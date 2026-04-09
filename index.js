@@ -23,10 +23,11 @@ const client = new Client({
   ]
 });
 
-// ===== TRACKING =====
+// ================= TRACKING SYSTEM =================
 const activityMap = new Map();
+const orderData = new Map(); // NEW: full order tracking
 
-// ===== SHOP =====
+// ================= SHOP =================
 const shopItems = [
   {
     name: "Roblox External",
@@ -42,57 +43,61 @@ const shopItems = [
   { name: "Valorant", price: 10, stock: 8 }
 ];
 
-// ===== PAYMENT (UNCHANGED) =====
+// ================= PAYMENT (UNCHANGED) =================
 const PAYMENT = {
   qrisImage: "https://cdn.discordapp.com/attachments/1491728132661842061/1491880425923153991/Qris_gw.png",
-  paypalEmail: "your-paypal@email.com"
+  paypalEmail: "your-paypal@email.com",
+  other: "Bank Transfer / Crypto / Manual approval"
 };
 
-// ===== PERMISSION =====
+// ================= PERMISSION =================
 const isAdmin = (member) =>
   member.permissions.has(PermissionsBitField.Flags.Administrator) ||
   member.permissions.has(PermissionsBitField.Flags.ManageChannels);
 
-// ===== COMMANDS (FIXED DASHBOARD) =====
+// ================= COMMANDS =================
 const commands = [
   new SlashCommandBuilder().setName("help").setDescription("Open shop UI"),
   new SlashCommandBuilder().setName("stock").setDescription("View stock"),
-  new SlashCommandBuilder().setName("dashboard").setDescription("Admin panel")
+  new SlashCommandBuilder().setName("dashboard").setDescription("Admin dashboard"),
+  new SlashCommandBuilder().setName("claim").setDescription("Claim ticket"),
+  new SlashCommandBuilder().setName("close").setDescription("Close ticket"),
+  new SlashCommandBuilder().setName("accept").setDescription("Accept payment (verify)")
 ];
 
 const rest = new REST({ version: "10" }).setToken(process.env.TOKEN);
 
 (async () => {
-  try {
-    await rest.put(
-      Routes.applicationCommands(process.env.CLIENT_ID),
-      { body: commands }
-    );
-    console.log("✅ Commands registered");
-  } catch (err) {
-    console.error(err);
-  }
+  await rest.put(
+    Routes.applicationCommands(process.env.CLIENT_ID),
+    { body: commands }
+  );
 })();
 
-// ===== READY =====
+// ================= READY =================
 client.once("clientReady", () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
-  // AUTO CLOSE (24h)
+  // AUTO CLOSE SYSTEM (24h inactivity)
   setInterval(async () => {
     const now = Date.now();
 
     for (const guild of client.guilds.cache.values()) {
-      for (const channel of guild.channels.cache.values()) {
-        if (!channel.name.startsWith("order-") && !channel.name.startsWith("support-")) continue;
+      for (const ch of guild.channels.cache.values()) {
+        if (!ch.name.startsWith("order-") && !ch.name.startsWith("support-")) continue;
 
-        const last = activityMap.get(channel.id) || now;
+        const last = activityMap.get(ch.id) || now;
 
         if (now - last > 86400000) {
           try {
-            await channel.setName("auto-closed-inactive");
-            await channel.send("⛔ Auto-closed due to inactivity.");
-            activityMap.delete(channel.id);
+            await ch.setName("auto-closed-inactive");
+            await ch.send("⛔ Auto-closed due to inactivity.");
+
+            if (orderData.has(ch.id)) {
+              orderData.get(ch.id).status = "auto-closed";
+            }
+
+            activityMap.delete(ch.id);
           } catch {}
         }
       }
@@ -100,27 +105,28 @@ client.once("clientReady", () => {
   }, 3600000);
 });
 
-// ===== INTERACTIONS =====
+// ================= INTERACTION =================
 client.on("interactionCreate", async (interaction) => {
   try {
 
-    // ===== SLASH COMMANDS =====
+    // ========== SLASH ==========
     if (interaction.isChatInputCommand()) {
 
+      // HELP
       if (interaction.commandName === "help") {
         const embed = new EmbedBuilder()
-          .setTitle("🛒 BOBA STORE")
-          .setDescription("Shop system")
+          .setTitle("🛒 SHOP SYSTEM")
           .setColor("#2b2d31");
 
         const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId("open_shop").setLabel("🛒 Shop").setStyle(ButtonStyle.Primary),
-          new ButtonBuilder().setCustomId("ticket_btn").setLabel("🎫 Support").setStyle(ButtonStyle.Secondary)
+          new ButtonBuilder().setCustomId("open_shop").setLabel("Shop").setStyle(ButtonStyle.Primary),
+          new ButtonBuilder().setCustomId("ticket_btn").setLabel("Support").setStyle(ButtonStyle.Secondary)
         );
 
         return interaction.reply({ embeds: [embed], components: [row] });
       }
 
+      // STOCK
       if (interaction.commandName === "stock") {
         const embed = new EmbedBuilder().setTitle("📦 Stock").setColor("#2b2d31");
 
@@ -137,34 +143,84 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.reply({ embeds: [embed] });
       }
 
-      // ===== DASHBOARD FIXED =====
+      // ================= DASHBOARD (NEW UPGRADED) =================
       if (interaction.commandName === "dashboard") {
         if (!isAdmin(interaction.member))
           return interaction.reply({ content: "❌ Admin only", flags: 64 });
 
-        const orders = interaction.guild.channels.cache.filter(c => c.name.startsWith("order-")).size;
-        const tickets = interaction.guild.channels.cache.filter(c => c.name.startsWith("support-")).size;
-        const closed = interaction.guild.channels.cache.filter(c => c.name.includes("closed") || c.name.includes("auto-closed")).size;
+        const now = Date.now();
 
-        const embed = new EmbedBuilder()
-          .setTitle("📊 DASHBOARD")
-          .addFields(
-            { name: "Orders", value: `${orders}`, inline: true },
-            { name: "Tickets", value: `${tickets}`, inline: true },
-            { name: "Closed", value: `${closed}`, inline: true }
-          )
-          .setColor("Blue");
+        const embeds = [];
 
-        return interaction.reply({ embeds: [embed], flags: 64 });
+        for (const [channelId, data] of orderData.entries()) {
+          const ch = interaction.guild.channels.cache.get(channelId);
+          if (!ch) continue;
+
+          const elapsed = Math.floor((now - data.createdAt) / 1000);
+
+          embeds.push(
+            new EmbedBuilder()
+              .setTitle(`📦 Order: ${ch.name}`)
+              .addFields(
+                { name: "👤 User", value: `<@${data.userId}>`, inline: true },
+                { name: "💰 Status", value: data.status, inline: true },
+                { name: "⏱ Time", value: `${elapsed}s ago`, inline: true },
+                { name: "🆔 Channel", value: `${ch.id}`, inline: false },
+                { name: "💳 Payment", value: `PayPal: ${PAYMENT.paypalEmail}\nOther: ${PAYMENT.other}`, inline: false }
+              )
+              .setColor("Blue")
+          );
+        }
+
+        if (embeds.length === 0) {
+          embeds.push(
+            new EmbedBuilder()
+              .setTitle("📊 Dashboard")
+              .setDescription("No active orders")
+              .setColor("Blue")
+          );
+        }
+
+        return interaction.reply({ embeds, flags: 64 });
+      }
+
+      // ================= CLAIM =================
+      if (interaction.commandName === "claim") {
+        await interaction.channel.setName(`claimed-${interaction.user.username}`);
+        return interaction.reply({ content: "✅ Claimed", flags: 64 });
+      }
+
+      // ================= CLOSE =================
+      if (interaction.commandName === "close") {
+        await interaction.channel.setName(`closed-${interaction.user.username}`);
+
+        if (orderData.has(interaction.channel.id)) {
+          orderData.get(interaction.channel.id).status = "closed";
+        }
+
+        return interaction.reply({ content: "❌ Closed", flags: 64 });
+      }
+
+      // ================= ACCEPT PAYMENT =================
+      if (interaction.commandName === "accept") {
+        if (!isAdmin(interaction.member))
+          return interaction.reply({ content: "❌ Admin only", flags: 64 });
+
+        await interaction.channel.setName(`paid-${interaction.user.username}`);
+
+        if (orderData.has(interaction.channel.id)) {
+          orderData.get(interaction.channel.id).status = "verified";
+        }
+
+        return interaction.reply({ content: "✔ Payment VERIFIED", flags: 64 });
       }
     }
 
-    // ===== BUTTONS =====
+    // ========== BUTTONS ==========
     if (interaction.isButton()) {
 
       activityMap.set(interaction.channel.id, Date.now());
 
-      // OPEN SHOP
       if (interaction.customId === "open_shop") {
         const options = [];
 
@@ -195,10 +251,9 @@ client.on("interactionCreate", async (interaction) => {
         });
       }
 
-      // SUPPORT
       if (interaction.customId === "ticket_btn") {
         const ch = await interaction.guild.channels.create({
-          name: `support-${interaction.user.username}`,
+          name: `order-${interaction.user.username}`,
           type: ChannelType.GuildText,
           permissionOverwrites: [
             { id: interaction.guild.id, deny: [PermissionsBitField.Flags.ViewChannel] },
@@ -206,11 +261,23 @@ client.on("interactionCreate", async (interaction) => {
           ]
         });
 
+        const data = {
+          userId: interaction.user.id,
+          createdAt: Date.now(),
+          status: "pending"
+        };
+
+        orderData.set(ch.id, data);
         activityMap.set(ch.id, Date.now());
 
         const embed = new EmbedBuilder()
-          .setTitle("🎫 Support Ticket")
-          .setDescription("Wait for admin.")
+          .setTitle("💳 PAYMENT")
+          .setDescription(
+            `💳 PayPal: ${PAYMENT.paypalEmail}\n` +
+            `🏦 Other: ${PAYMENT.other}\n\n` +
+            `Upload proof then click Paid`
+          )
+          .setImage(PAYMENT.qrisImage)
           .setColor("Yellow");
 
         const row = new ActionRowBuilder().addComponents(
@@ -222,38 +289,23 @@ client.on("interactionCreate", async (interaction) => {
         return interaction.reply({ content: `Created ${ch}`, flags: 64 });
       }
 
-      // PAID SYSTEM (UNCHANGED LOGIC)
       if (interaction.customId === "paid_btn") {
-        await interaction.channel.setName(`pending-verification-${interaction.user.username}`);
+        await interaction.channel.setName(`pending-${interaction.user.username}`);
 
-        const verify = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId("verify_payment").setLabel("✔ Verify").setStyle(ButtonStyle.Success)
-        );
+        if (orderData.has(interaction.channel.id)) {
+          orderData.get(interaction.channel.id).status = "pending-verification";
+        }
 
         const embed = EmbedBuilder.from(interaction.message.embeds[0])
           .setFooter({ text: "Pending verification" });
 
-        await interaction.message.edit({ embeds: [embed], components: [verify] });
+        await interaction.message.edit({ embeds: [embed] });
 
         return interaction.reply({ content: "Sent for verification", flags: 64 });
       }
-
-      if (interaction.customId === "verify_payment") {
-        if (!isAdmin(interaction.member))
-          return interaction.reply({ content: "❌ Admin only", flags: 64 });
-
-        await interaction.channel.setName(`paid-${interaction.user.username}`);
-
-        const embed = EmbedBuilder.from(interaction.message.embeds[0])
-          .setFooter({ text: "Verified" });
-
-        await interaction.message.edit({ embeds: [embed], components: [] });
-
-        return interaction.reply({ content: "✔ Verified", flags: 64 });
-      }
     }
 
-    // ===== SELECT MENU =====
+    // ========== SELECT MENU ==========
     if (interaction.isStringSelectMenu()) {
       if (interaction.customId === "select_item") {
 
@@ -268,11 +320,22 @@ client.on("interactionCreate", async (interaction) => {
           ]
         });
 
+        const data = {
+          userId: interaction.user.id,
+          createdAt: Date.now(),
+          status: "pending"
+        };
+
+        orderData.set(ch.id, data);
         activityMap.set(ch.id, Date.now());
 
         const embed = new EmbedBuilder()
-          .setTitle("💳 Payment")
-          .setDescription(`📦 ${name} (${variant})\n💰 $${price}`)
+          .setTitle("💳 PAYMENT")
+          .setDescription(
+            `📦 ${name} (${variant})\n💰 $${price}\n\n` +
+            `💳 PayPal: ${PAYMENT.paypalEmail}\n` +
+            `🏦 Other: ${PAYMENT.other}`
+          )
           .setImage(PAYMENT.qrisImage)
           .setColor("Yellow");
 
@@ -294,13 +357,14 @@ client.on("interactionCreate", async (interaction) => {
   }
 });
 
-// ===== ACTIVITY TRACK =====
+// ========== ACTIVITY TRACK ==========
 client.on("messageCreate", (msg) => {
   if (msg.author.bot) return;
+
   if (msg.channel.name.startsWith("order-") || msg.channel.name.startsWith("support-")) {
     activityMap.set(msg.channel.id, Date.now());
   }
 });
 
-// ===== LOGIN =====
+// ========== LOGIN ==========
 client.login(process.env.TOKEN);
