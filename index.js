@@ -552,7 +552,7 @@ registerCommands();
 // ─────────────────────────────────────────────
 client.once("ready", () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
-  client.user.setActivity("🛒 BOBA SHOP | /shop", { type: 0 });
+  client.user.setActivity("https://phantomexternal.mysellauth.com/", { type: 0 });
 
   // Auto-close idle tickets every 30 min
   setInterval(async () => {
