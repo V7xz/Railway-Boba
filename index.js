@@ -67,33 +67,7 @@ const shopItems = [
     stock: 13,
     emoji: "🎮",
     variants: [
-      { label: "3 Days",   price: 3,  value: "3d"   },
-      { label: "7 Days",   price: 7,  value: "7d"   },
-      { label: "30 Days",  price: 15, value: "30d"  },
-      { label: "Lifetime", price: 18, value: "perm" }
-    ]
-  },
-  {
-    id: "rust",
-    name: "Rust",
-    description: "Rust cheat with aimbot + ESP",
-    stock: 4,
-    emoji: "🦀",
-    variants: [
-      { label: "30 Days",  price: 20, value: "30d"  },
-      { label: "Lifetime", price: 35, value: "perm" }
-    ]
-  },
-  {
-    id: "valorant",
-    name: "Valorant",
-    description: "Valorant cheat — aimbot + wallhack",
-    stock: 8,
-    emoji: "🎯",
-    variants: [
-      { label: "7 Days",   price: 10, value: "7d"   },
-      { label: "30 Days",  price: 22, value: "30d"  },
-      { label: "Lifetime", price: 40, value: "perm" }
+      { label: "Lifetime", price: 9.99, value: "perm" }
     ]
   }
 ];
@@ -321,7 +295,7 @@ function buildShopRow() {
 function buildSupportEmbed() {
   return new EmbedBuilder()
     .setTitle("🎫  SUPPORT")
-    .setDescription("Need help with an order or have a question?\nClick the button below to open a **private** support ticket.\n\nA staff member will assist you as soon as possible.")
+    .setDescription("Need help with an order or have a question?\nClick a button below to open a **private** ticket.\n\nA staff member will assist you as soon as possible.")
     .setColor(0x5865f2)
     .addFields(
       { name: "📌 Before opening a ticket", value: "• Check if your question is already answered\n• Have your order ID ready if it's order-related\n• Be patient — staff will respond shortly", inline: false }
@@ -332,7 +306,8 @@ function buildSupportEmbed() {
 
 function buildSupportRow() {
   return new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId("ticket_support").setLabel("Open a Support Ticket").setStyle(ButtonStyle.Primary).setEmoji("🎫")
+    new ButtonBuilder().setCustomId("ticket_support").setLabel("Support").setStyle(ButtonStyle.Primary).setEmoji("🎫"),
+    new ButtonBuilder().setCustomId("ticket_order_external").setLabel("Order External").setStyle(ButtonStyle.Success).setEmoji("🛒")
   );
 }
 
@@ -442,21 +417,12 @@ async function logEvent(guild, type, data, actor) {
 const ADMIN_PERM = PermissionsBitField.Flags.Administrator.toString();
 
 const commands = [
-  // ── Public (no permission required to see, but admin-only enforced in handler) ─
+  // ── Public ──────────────────────────────────────────────────────────────────
   new SlashCommandBuilder()
     .setName("shop")
     .setDescription("Browse the shop and place an order"),
 
-  new SlashCommandBuilder()
-    .setName("stock")
-    .setDescription("View live product stock"),
-
   // ── All below: Admin only ────────────────────────────────────────────────────
-  new SlashCommandBuilder()
-    .setName("setup")
-    .setDescription("Post the shop panel to this channel")
-    .setDefaultMemberPermissions(ADMIN_PERM),
-
   new SlashCommandBuilder()
     .setName("setup-support")
     .setDescription("Post the support panel to this channel")
@@ -497,29 +463,6 @@ const commands = [
     .setDescription("Reject the order in this ticket channel")
     .setDefaultMemberPermissions(ADMIN_PERM),
 
-  new SlashCommandBuilder()
-    .setName("addstock")
-    .setDescription("Add stock to a product")
-    .setDefaultMemberPermissions(ADMIN_PERM)
-    .addStringOption(o =>
-      o.setName("product").setDescription("Product").setRequired(true)
-       .addChoices(...shopItems.map(i => ({ name: i.name, value: i.id })))
-    )
-    .addIntegerOption(o =>
-      o.setName("amount").setDescription("Amount to add").setRequired(true).setMinValue(1).setMaxValue(9999)
-    ),
-
-  new SlashCommandBuilder()
-    .setName("setstock")
-    .setDescription("Set exact stock for a product")
-    .setDefaultMemberPermissions(ADMIN_PERM)
-    .addStringOption(o =>
-      o.setName("product").setDescription("Product").setRequired(true)
-       .addChoices(...shopItems.map(i => ({ name: i.name, value: i.id })))
-    )
-    .addIntegerOption(o =>
-      o.setName("amount").setDescription("Exact stock value").setRequired(true).setMinValue(0).setMaxValue(9999)
-    )
 ].map(c => c.toJSON());
 
 // ─────────────────────────────────────────────
@@ -615,26 +558,6 @@ async function handleSlash(interaction) {
   // ── /shop ────────────────────────────────────────────────────────────────────
   if (commandName === "shop") {
     return interaction.reply({ embeds: [buildShopEmbed()], components: [buildShopRow()], flags: 64 });
-  }
-
-  // ── /stock ───────────────────────────────────────────────────────────────────
-  if (commandName === "stock") {
-    const e = new EmbedBuilder().setTitle("📦 Live Stock").setColor(0x2b2d31).setTimestamp();
-    shopItems.forEach(item => {
-      e.addFields({
-        name:   `${item.emoji}  ${item.name}`,
-        value:  `${buildStockBar(item.stock, 20)}  **${item.stock}** available\n${item.variants.map(v => `\`${v.label}\` → ${fmt.price(v.price)}`).join("  |  ")}`,
-        inline: false
-      });
-    });
-    return interaction.reply({ embeds: [e], flags: 64 });
-  }
-
-  // ── /setup ───────────────────────────────────────────────────────────────────
-  if (commandName === "setup") {
-    if (!isAdmin(member)) return safeReply(interaction, { content: "❌ Admin only." });
-    await channel.send({ embeds: [buildShopEmbed()], components: [buildShopRow()] });
-    return interaction.reply({ content: "✅ Shop panel posted.", flags: 64 });
   }
 
   // ── /setup-support ───────────────────────────────────────────────────────────
@@ -779,31 +702,6 @@ async function handleSlash(interaction) {
         )
     );
   }
-
-  // ── /addstock ────────────────────────────────────────────────────────────────
-  if (commandName === "addstock") {
-    if (!isAdmin(member)) return safeReply(interaction, { content: "❌ Admin only." });
-    const item = shopItems.find(i => i.id === interaction.options.getString("product"));
-    if (!item) return safeReply(interaction, { content: "❌ Product not found." });
-    const amount = interaction.options.getInteger("amount");
-    item.stock += amount;
-    return interaction.reply({
-      embeds: [new EmbedBuilder().setColor(0x57f287).setDescription(`✅ Added **${amount}** to **${item.name}**. Now: **${item.stock}** in stock.`)],
-      flags: 64
-    });
-  }
-
-  // ── /setstock ────────────────────────────────────────────────────────────────
-  if (commandName === "setstock") {
-    if (!isAdmin(member)) return safeReply(interaction, { content: "❌ Admin only." });
-    const item = shopItems.find(i => i.id === interaction.options.getString("product"));
-    if (!item) return safeReply(interaction, { content: "❌ Product not found." });
-    item.stock = interaction.options.getInteger("amount");
-    return interaction.reply({
-      embeds: [new EmbedBuilder().setColor(0x57f287).setDescription(`✅ **${item.name}** stock set to **${item.stock}**.`)],
-      flags: 64
-    });
-  }
 }
 
 // ─────────────────────────────────────────────
@@ -872,6 +770,46 @@ async function handleButton(interaction) {
       ]
     });
     return interaction.reply({ content: `✅ Support ticket created: ${ch}`, flags: 64 });
+  }
+
+  // ── Open Order External Ticket ───────────────────────────────────────────────
+  if (customId === "ticket_order_external") {
+    if (userOpenTicketCount(user.id) >= CONFIG.MAX_OPEN_TICKETS_PER_USER) {
+      return safeReply(interaction, { content: `❌ You already have **${CONFIG.MAX_OPEN_TICKETS_PER_USER}** open tickets.` });
+    }
+    const ch = await guild.channels.create({
+      name: `order-ext-${user.username.slice(0, 20).toLowerCase()}`,
+      type: ChannelType.GuildText,
+      permissionOverwrites: [
+        { id: guild.id, deny:  [PermissionsBitField.Flags.ViewChannel] },
+        { id: user.id,  allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] }
+      ]
+    });
+    if (!userTickets.has(user.id)) userTickets.set(user.id, new Set());
+    userTickets.get(user.id).add(ch.id);
+
+    trackMessage(ch.id, "SYSTEM", `[OPENED] Order External ticket opened by ${user.tag}`);
+
+    await ch.send({
+      content: `<@${user.id}>`,
+      embeds: [
+        new EmbedBuilder()
+          .setTitle("🛒 Order External Ticket")
+          .setColor(0x57f287)
+          .setDescription("Thanks for your interest! Please tell us what product you'd like to order and a staff member will assist you shortly.")
+          .addFields(
+            { name: "Opened by", value: `<@${user.id}>`, inline: true },
+            { name: "Opened",    value: fmt.ts(Date.now()), inline: true },
+            { name: "ℹ️ Info", value: "Please describe what you'd like to purchase and any relevant details.", inline: false }
+          )
+      ],
+      components: [
+        new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId("close_support").setLabel("Close Ticket").setStyle(ButtonStyle.Danger).setEmoji("🔒")
+        )
+      ]
+    });
+    return interaction.reply({ content: `✅ Order External ticket created: ${ch}`, flags: 64 });
   }
 
   // ── Close Support Ticket ─────────────────────────────────────────────────────
@@ -1252,11 +1190,12 @@ client.on("messageCreate", (msg) => {
   const name = msg.channel.name || "";
 
   if (
-    name.startsWith("order-")   ||
-    name.startsWith("support-") ||
-    name.startsWith("claimed-") ||
-    name.startsWith("approved-")||
-    name.startsWith("rejected-")
+    name.startsWith("order-")    ||
+    name.startsWith("support-")  ||
+    name.startsWith("claimed-")  ||
+    name.startsWith("approved-") ||
+    name.startsWith("rejected-") ||
+    name.startsWith("order-ext-")
   ) {
     activityMap.set(msg.channel.id, Date.now());
     trackMessage(msg.channel.id, `${msg.author.tag}`, msg.content || "[attachment/embed]");
