@@ -192,20 +192,29 @@ function trackMessage(channelId, author, content) {
   ticketMessages.get(channelId).push({ author, content, timestamp: new Date().toISOString() });
 }
 
+// FIX: Use spread (...orderLines) instead of nested array in ternary so lines stay flat
 function buildTranscriptText(channelId, channelName, order) {
   const messages = ticketMessages.get(channelId) || [];
+
+  const orderLines = order
+    ? [
+        `Order ID  : ${fmt.id(order.orderId)}`,
+        `Product   : ${order.item} (${order.variant})`,
+        `Price     : ${fmt.price(order.price)}`,
+        `Customer  : ${order.userId}`,
+        `Status    : ${statusBadge(order.status)}`,
+        `Payment   : ${order.paymentMethod || "N/A"}`,
+        `Opened    : ${new Date(order.createdAt).toUTCString()}`
+      ]
+    : [`Type      : Support Ticket`];
+
   const lines = [
     `══════════════════════════════════════`,
-    `  BOBA SHOP — TICKET TRANSCRIPT`,
+    ` Phantom — TICKET TRANSCRIPT`,
     `══════════════════════════════════════`,
     `Channel   : #${channelName}`,
     `Channel ID: ${channelId}`,
-    order
-      ? [`Order ID  : ${fmt.id(order.orderId)}`, `Product   : ${order.item} (${order.variant})`,
-         `Price     : ${fmt.price(order.price)}`, `Customer  : ${order.userId}`,
-         `Status    : ${statusBadge(order.status)}`, `Payment   : ${order.paymentMethod || "N/A"}`,
-         `Opened    : ${new Date(order.createdAt).toUTCString()}`].join("\n")
-      : `Type      : Support Ticket`,
+    ...orderLines,
     `══════════════════════════════════════`,
     `MESSAGES (${messages.length} total)`,
     `══════════════════════════════════════`,
@@ -214,6 +223,7 @@ function buildTranscriptText(channelId, channelName, order) {
     `  END OF TRANSCRIPT`,
     `══════════════════════════════════════`
   ];
+
   return lines.join("\n");
 }
 
@@ -681,7 +691,7 @@ async function handleButton(interaction) {
     return interaction.reply({ content: `✅ Order External ticket created: ${ch}`, flags: 64 });
   }
 
-  // ── NEW: ORDER SCRIPT BUTTON ──────────────────────────────────────────────
+  // ── ORDER SCRIPT BUTTON ──────────────────────────────────────────────
   if (customId === "ticket_order_script") {
     if (userOpenTicketCount(user.id) >= CONFIG.MAX_OPEN_TICKETS_PER_USER) {
       return safeReply(interaction, { content: `❌ You already have **${CONFIG.MAX_OPEN_TICKETS_PER_USER}** open tickets.` });
@@ -775,7 +785,7 @@ async function handleButton(interaction) {
     return;
   }
 
-  // ── NEW: SCRIPT PAID BUTTON ───────────────────────────────────────────────
+  // ── SCRIPT PAID BUTTON ───────────────────────────────────────────────────
   if (customId.startsWith("script_paid_btn:")) {
     const [, targetChannelId] = splitCustomId(customId);
     const data = orderData.get(targetChannelId);
@@ -948,8 +958,8 @@ async function handleSelect(interaction) {
     });
   }
 
-  // ── NEW: SELECT SCRIPT PRODUCT ────────────────────────────────────────────
-if (customId === "select_script_product") {
+  // ── SELECT SCRIPT PRODUCT ────────────────────────────────────────────────
+  if (customId === "select_script_product") {
     const productValue = interaction.values[0];
     const product = scriptProducts.find(p => p.value === productValue);
     if (!product) return safeReply(interaction, { content: "❌ Script not found." });
@@ -976,7 +986,7 @@ if (customId === "select_script_product") {
     return;
   }
 
-  // ── NEW: SELECT SCRIPT DURATION ───────────────────────────────────────────
+  // ── SELECT SCRIPT DURATION ───────────────────────────────────────────────
   if (customId.startsWith("select_script_duration:")) {
     const [, targetChannelId] = splitCustomId(customId);
     const durationValue = interaction.values[0];
@@ -1052,7 +1062,7 @@ if (customId === "select_script_product") {
     return interaction.reply({ content: `✅ Duration selected! Please review the payment instructions above.`, flags: 64 });
   }
 
-  // ── NEW: SELECT SCRIPT PAYMENT ────────────────────────────────────────────
+  // ── SELECT SCRIPT PAYMENT ────────────────────────────────────────────────
   if (customId.startsWith("select_script_payment:")) {
     const [, targetChannelId] = splitCustomId(customId);
     const data = orderData.get(targetChannelId);
@@ -1151,6 +1161,8 @@ async function handleModal(interaction) {
     const targetCh = guild.channels.cache.get(targetChannelId);
     if (!targetCh) return safeReply(interaction, { content: "❌ Channel not found." });
     await targetCh.send({ content: message }).catch(() => {});
+    // FIX: Track staff /say messages so they appear in transcripts
+    trackMessage(targetChannelId, `[STAFF] ${user.tag}`, message);
     return interaction.reply({ content: "✅ Message sent!", flags: 64 });
   }
 
