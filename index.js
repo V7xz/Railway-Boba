@@ -64,6 +64,18 @@ const externalProducts = [
   { label: "Roblox [ Lifetime ]", value: "roblox_lifetime", price: 9.99, emoji: "🎮" }
 ];
 
+const scriptProducts = [
+  { label: "South Bronx", value: "south_bronx", emoji: "📜" }
+];
+
+const scriptDurations = [
+  { label: "1 Day",     value: "1d",       price: 3.99  },
+  { label: "3 Days",    value: "3d",       price: 7.99  },
+  { label: "7 Days",    value: "7d",       price: 12.99 },
+  { label: "1 Month",   value: "1m",       price: 24.99 },
+  { label: "Lifetime",  value: "lifetime", price: 39.99 }
+];
+
 const PAYMENT = {
   qris: {
     label: "QRIS",
@@ -74,13 +86,13 @@ const PAYMENT = {
   paypal: {
     label: "PayPal",
     emoji: "💳",
-    address: "your-paypal@email.com",
+    address: "phantom.wtfff@gmail.com",
     instructions: "Send as **Friends & Family** to avoid fees. Include your Order ID in the note."
   },
   crypto: {
     label: "Crypto (USDT TRC20)",
     emoji: "🪙",
-    address: "TYourCryptoAddressHere",
+    address: "We do not support crypto yet",
     instructions: "Send the exact amount in **USDT on TRC20** network only."
   }
 };
@@ -270,7 +282,8 @@ function buildSupportEmbed() {
 function buildSupportRow() {
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId("ticket_support")       .setLabel("Support")       .setStyle(ButtonStyle.Primary).setEmoji("🎫"),
-    new ButtonBuilder().setCustomId("ticket_order_external").setLabel("Order External").setStyle(ButtonStyle.Success).setEmoji("🛒")
+    new ButtonBuilder().setCustomId("ticket_order_external").setLabel("Order External").setStyle(ButtonStyle.Success).setEmoji("🛒"),
+    new ButtonBuilder().setCustomId("ticket_order_script")  .setLabel("Order Script")  .setStyle(ButtonStyle.Secondary).setEmoji("📜")
   );
 }
 
@@ -288,10 +301,45 @@ function buildExternalProductSelect() {
   );
 }
 
+function buildScriptProductSelect() {
+  return new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId("select_script_product")
+      .setPlaceholder("Select a script...")
+      .addOptions(scriptProducts.map(p => ({
+        label: p.label,
+        value: p.value,
+        emoji: p.emoji
+      })))
+  );
+}
+
+function buildScriptDurationSelect(channelId) {
+  return new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId(`select_script_duration:${channelId}`)
+      .setPlaceholder("Select duration...")
+      .addOptions(scriptDurations.map(d => ({
+        label:       d.label,
+        value:       d.value,
+        description: `Price: ${fmt.price(d.price)}`
+      })))
+  );
+}
+
 function buildExternalPaymentSelect(channelId) {
   return new ActionRowBuilder().addComponents(
     new StringSelectMenuBuilder()
       .setCustomId(`select_ext_payment:${channelId}`)
+      .setPlaceholder("Choose payment method...")
+      .addOptions(Object.entries(PAYMENT).map(([key, m]) => ({ label: m.label, value: key, emoji: m.emoji })))
+  );
+}
+
+function buildScriptPaymentSelect(channelId) {
+  return new ActionRowBuilder().addComponents(
+    new StringSelectMenuBuilder()
+      .setCustomId(`select_script_payment:${channelId}`)
       .setPlaceholder("Choose payment method...")
       .addOptions(Object.entries(PAYMENT).map(([key, m]) => ({ label: m.label, value: key, emoji: m.emoji })))
   );
@@ -633,6 +681,44 @@ async function handleButton(interaction) {
     return interaction.reply({ content: `✅ Order External ticket created: ${ch}`, flags: 64 });
   }
 
+  // ── NEW: ORDER SCRIPT BUTTON ──────────────────────────────────────────────
+  if (customId === "ticket_order_script") {
+    if (userOpenTicketCount(user.id) >= CONFIG.MAX_OPEN_TICKETS_PER_USER) {
+      return safeReply(interaction, { content: `❌ You already have **${CONFIG.MAX_OPEN_TICKETS_PER_USER}** open tickets.` });
+    }
+    const ch = await guild.channels.create({
+      name: `order-script-${user.username.slice(0, 20).toLowerCase()}`,
+      type: ChannelType.GuildText,
+      permissionOverwrites: [
+        { id: guild.id, deny: [PermissionsBitField.Flags.ViewChannel] },
+        { id: user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] }
+      ]
+    });
+    if (!userTickets.has(user.id)) userTickets.set(user.id, new Set());
+    userTickets.get(user.id).add(ch.id);
+    trackMessage(ch.id, "SYSTEM", `[OPENED] Order Script ticket opened by ${user.tag}`);
+    await ch.send({
+      content: `<@${user.id}>`,
+      embeds: [
+        new EmbedBuilder()
+          .setTitle("📜 Order Script")
+          .setColor(0x5865f2)
+          .setDescription(`Welcome, <@${user.id}>! 👋\n\nPlease select the script you'd like to purchase from the dropdown below.\nA staff member will assist you shortly.`)
+          .addFields(
+            { name: "Opened by", value: `<@${user.id}>`, inline: true },
+            { name: "Opened",    value: fmt.ts(Date.now()), inline: true }
+          )
+          .setFooter({ text: "Select a script to continue." })
+          .setTimestamp()
+      ],
+      components: [
+        buildScriptProductSelect(),
+        new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId("close_support").setLabel("Close Ticket").setStyle(ButtonStyle.Danger).setEmoji("🔒"))
+      ]
+    });
+    return interaction.reply({ content: `✅ Order Script ticket created: ${ch}`, flags: 64 });
+  }
+
   if (customId === "close_support") {
     if (!isAdmin(member)) return safeReply(interaction, { content: "❌ Admin only." });
     trackMessage(channel.id, "SYSTEM", `[CLOSED] Ticket closed by ${interaction.user.tag}`);
@@ -681,6 +767,29 @@ async function handleButton(interaction) {
     if (logCh) {
       await logCh.send({
         embeds: [buildOrderEmbed(data).setTitle(`🔔 Payment Submitted — Order ${fmt.id(data.orderId)} [External]`).setDescription(`<@${user.id}> marked their external order as paid. Review before approving.`)],
+        components: [buildAdminActionRow(targetChannelId)]
+      });
+    }
+    await channel.send({ embeds: [new EmbedBuilder().setColor(0xfee75c).setTitle("💸 Payment Submitted!").setDescription("Your payment is under review. An admin will verify it shortly.\nDo **not** click again — it's already submitted.").addFields({ name: "Submitted", value: fmt.ts(Date.now()), inline: true })] });
+    await logEvent(guild, "paid", data, user);
+    return;
+  }
+
+  // ── NEW: SCRIPT PAID BUTTON ───────────────────────────────────────────────
+  if (customId.startsWith("script_paid_btn:")) {
+    const [, targetChannelId] = splitCustomId(customId);
+    const data = orderData.get(targetChannelId);
+    if (!data)                             return safeReply(interaction, { content: "❌ No order found." });
+    if (data.userId !== user.id)           return safeReply(interaction, { content: "❌ This isn't your order." });
+    if (data.status !== "waiting_payment") return safeReply(interaction, { content: "⚠️ Already submitted." });
+    if (!data.paymentMethod)               return safeReply(interaction, { content: "❌ Choose a payment method first!" });
+    await interaction.reply({ content: "✅ Submitted! Waiting for admin to verify your payment...", flags: 64 });
+    data.status = "waiting_review"; data.paidAt = Date.now();
+    trackMessage(targetChannelId, user.tag, `[PAID] Script order marked paid via ${data.paymentMethod}`);
+    const logCh = getLogChannel(guild);
+    if (logCh) {
+      await logCh.send({
+        embeds: [buildOrderEmbed(data).setTitle(`🔔 Payment Submitted — Order ${fmt.id(data.orderId)} [Script]`).setDescription(`<@${user.id}> marked their script order as paid. Review before approving.`)],
         components: [buildAdminActionRow(targetChannelId)]
       });
     }
@@ -839,6 +948,128 @@ async function handleSelect(interaction) {
     });
   }
 
+  // ── NEW: SELECT SCRIPT PRODUCT ────────────────────────────────────────────
+  if (customId === "select_script_product") {
+    const productValue = interaction.values[0];
+    const product = scriptProducts.find(p => p.value === productValue);
+    if (!product) return safeReply(interaction, { content: "❌ Script not found." });
+
+    trackMessage(channel.id, user.tag, `[SCRIPT SELECTED] ${product.label}`);
+
+    await interaction.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle(`${product.emoji}  ${product.label} — Select Duration`)
+          .setColor(0x5865f2)
+          .setDescription("Please select how long you'd like access to this script.")
+          .addFields(
+            { name: "1 Day",    value: `${fmt.price()}`,  inline: true },
+            { name: "3 Days",   value: `${fmt.price(7.99)}`,  inline: true },
+            { name: "7 Days",   value: `${fmt.price(12.99)}`, inline: true },
+            { name: "1 Month",  value: `${fmt.price(24.99)}`, inline: true },
+            { name: "Lifetime", value: `${fmt.price(39.99)}`, inline: true }
+          )
+          .setFooter({ text: "Select a duration below to continue." })
+          .setTimestamp()
+      ],
+      components: [buildScriptDurationSelect(channel.id)],
+      flags: 64
+    });
+    return;
+  }
+
+  // ── NEW: SELECT SCRIPT DURATION ───────────────────────────────────────────
+  if (customId.startsWith("select_script_duration:")) {
+    const [, targetChannelId] = splitCustomId(customId);
+    const durationValue = interaction.values[0];
+    const duration = scriptDurations.find(d => d.value === durationValue);
+    if (!duration) return safeReply(interaction, { content: "❌ Duration not found." });
+
+    const orderId = orderCounter++;
+    const record = {
+      orderId, userId: user.id,
+      item: "South Bronx", itemId: "south_bronx", emoji: "📜",
+      variant: duration.label, variantValue: duration.value,
+      price: duration.price, paymentMethod: null,
+      status: "waiting_payment", createdAt: Date.now()
+    };
+    orderData.set(targetChannelId, record);
+    activityMap.set(targetChannelId, Date.now());
+    trackMessage(targetChannelId, user.tag, `[DURATION SELECTED] South Bronx — ${duration.label} at ${fmt.price(duration.price)}`);
+
+    const qris   = PAYMENT.qris;
+    const paypal = PAYMENT.paypal;
+    const crypto = PAYMENT.crypto;
+
+    await channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle(`${qris.emoji}  QRIS — Payment`)
+          .setColor(0x5865f2)
+          .setDescription(qris.instructions)
+          .addFields({ name: "💰 Amount Due", value: `**${fmt.price(duration.price)}**`, inline: true })
+          .setImage(qris.image)
+          .setFooter({ text: "After paying, select your method below and click I've Paid." })
+      ]
+    });
+
+    await channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle("💳  Other Payment Methods")
+          .setColor(0x5865f2)
+          .addFields(
+            { name: `${paypal.emoji}  PayPal`, value: `${paypal.instructions}\n**Address:** \`${paypal.address}\``, inline: false },
+            { name: `${crypto.emoji}  ${crypto.label}`, value: `${crypto.instructions}\n**Wallet:** \`${crypto.address}\``, inline: false },
+            { name: "💰 Amount Due", value: `**${fmt.price(duration.price)}**`, inline: true }
+          )
+          .setFooter({ text: "Send Friends & Family for PayPal. TRC20 only for Crypto." })
+      ]
+    });
+
+    await channel.send({
+      embeds: [
+        new EmbedBuilder()
+          .setTitle(`📜 Order ${fmt.id(orderId)} — South Bronx`)
+          .setColor(0xfee75c)
+          .setDescription("**1.** Select your payment method below\n**2.** Complete the payment using the instructions above\n**3.** Click **I've Paid ✅**")
+          .addFields(
+            { name: "📜  Script",   value: "South Bronx",                inline: true },
+            { name: "📦 Duration", value: duration.label,                 inline: true },
+            { name: "💰 Price",    value: `**${fmt.price(duration.price)}**`, inline: true },
+            { name: "📌 Status",   value: statusBadge("waiting_payment"), inline: true }
+          )
+          .setFooter({ text: `Order ${fmt.id(orderId)}` })
+          .setTimestamp()
+      ],
+      components: [
+        buildScriptPaymentSelect(targetChannelId),
+        new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`script_paid_btn:${targetChannelId}`).setLabel("I've Paid ✅").setStyle(ButtonStyle.Success)
+        )
+      ]
+    });
+
+    await logEvent(channel.guild, "new_order", record, user);
+    return interaction.reply({ content: `✅ Duration selected! Please review the payment instructions above.`, flags: 64 });
+  }
+
+  // ── NEW: SELECT SCRIPT PAYMENT ────────────────────────────────────────────
+  if (customId.startsWith("select_script_payment:")) {
+    const [, targetChannelId] = splitCustomId(customId);
+    const data = orderData.get(targetChannelId);
+    if (!data || data.userId !== user.id) return safeReply(interaction, { content: "❌ No active order found." });
+    const key    = interaction.values[0];
+    const method = PAYMENT[key];
+    if (!method) return safeReply(interaction, { content: "❌ Invalid payment method." });
+    data.paymentMethod = method.label;
+    trackMessage(targetChannelId, user.tag, `[PAYMENT METHOD] Selected: ${method.label}`);
+    return interaction.reply({
+      embeds: [new EmbedBuilder().setColor(0x57f287).setDescription(`✅ Payment method set to **${method.emoji} ${method.label}**. Complete your payment and click **I've Paid ✅**.`)],
+      flags: 64
+    });
+  }
+
   if (customId === "select_item") {
     const [itemId, variantValue, price, itemName, variantLabel] = interaction.values[0].split("|");
     const item = shopItems.find(i => i.id === itemId);
@@ -968,12 +1199,13 @@ client.on("messageCreate", (msg) => {
   if (msg.author.bot) return;
   const name = msg.channel.name || "";
   if (
-    name.startsWith("order-")    ||
-    name.startsWith("support-")  ||
-    name.startsWith("claimed-")  ||
-    name.startsWith("approved-") ||
-    name.startsWith("rejected-") ||
-    name.startsWith("order-ext-")
+    name.startsWith("order-")         ||
+    name.startsWith("support-")       ||
+    name.startsWith("claimed-")       ||
+    name.startsWith("approved-")      ||
+    name.startsWith("rejected-")      ||
+    name.startsWith("order-ext-")     ||
+    name.startsWith("order-script-")
   ) {
     activityMap.set(msg.channel.id, Date.now());
     trackMessage(msg.channel.id, `${msg.author.tag}`, msg.content || "[attachment/embed]");
