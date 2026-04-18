@@ -55,13 +55,13 @@ const shopItems = [
     stock: 13,
     emoji: "🎮",
     variants: [
-      { label: "Lifetime", price: 9.99, value: "perm" }
+      { label: "Lifetime", price: 4.99, value: "perm" }
     ]
   }
 ];
 
 const externalProducts = [
-  { label: "Roblox [ Lifetime ]", value: "roblox_lifetime", price: 9.99, emoji: "🎮" }
+  { label: "Roblox [ Lifetime ]", value: "roblox_lifetime", price: 4.99, emoji: "🎮" }
 ];
 
 const scriptProducts = [
@@ -257,7 +257,7 @@ async function sendTranscript(guild, channelId, channelName, closedBy) {
 // ── BUILDERS ──────────────────────────────────────────────────────────────────
 function buildShopEmbed() {
   const e = new EmbedBuilder()
-    .setTitle("🛒  BOBA SHOP")
+    .setTitle("🛒  Phantom.wtf")
     .setDescription("Browse our catalogue and open a ticket to purchase.")
     .setColor(0x2b2d31)
     .setFooter({ text: "Use the buttons below to browse or get support." })
