@@ -1,6 +1,3 @@
-
-Copy
-
 require("dotenv").config();
  
 const {
