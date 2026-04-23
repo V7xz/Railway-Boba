@@ -215,9 +215,9 @@ function onCooldown(userId) {
 async function safeReply(interaction, payload) {
   try {
     if (interaction.replied || interaction.deferred) {
-      return await interaction.followUp({ ...payload, ephemeral: true });
+      return await interaction.followUp({ ...payload, flags: 64 });
     }
-    return await interaction.reply({ ...payload, ephemeral: true });
+    return await interaction.reply({ ...payload, flags: 64 });
   } catch (e) {
     console.error("[safeReply]", e.message);
   }
@@ -622,34 +622,64 @@ async function handleSlash(interaction) {
 
   // ── Key Bot Commands ───────────────────────────────────────────────────────
 
-  if (commandName === "genkey") {
-    if (!isAdmin(member)) return safeReply(interaction, { content: "No permission." });
-    const duration = options.getString("duration");
-    const key = generateKey();
-    const seconds = durationToSeconds(duration);
-    try {
-      const res = await fetch(`${API_URL}/addkey`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ secret: API_SECRET, key, duration: seconds })
-      }).then(r => r.json());
-      if (!res || !res.success) return safeReply(interaction, { content: "❌ API failed." });
-      const script = `_G.KEY="${key}"\nloadstring(game:HttpGet("${LOADER_URL}"))()`;
-      const embed = new EmbedBuilder()
-        .setColor(COLOR_GREEN)
-        .setTitle("✅ Key Generated")
-        .addFields(
-          { name: "Key", value: `\`${key}\`` },
-          { name: "Duration", value: durationLabel(duration), inline: true },
-          { name: "Loader", value: "```lua\n" + script + "\n```" }
-        )
-        .setTimestamp();
-      return interaction.reply({ embeds: [embed], ephemeral: true });
-    } catch (e) {
-      console.error(e);
-      return safeReply(interaction, { content: "Server unreachable." });
-    }
+if (commandName === "genkey") {
+  if (!isAdminByRole(interaction))
+    return interaction.reply({ content: "Kamu tidak punya izin!", flags: 64 });
+
+  // 1. Defer immediately to prevent timeout
+  await interaction.deferReply({ flags: 64 });
+
+  const durasiStr   = interaction.options.getString("durasi") || "1d";
+  const durasiDetik = parseDurasi(durasiStr);
+  const key         = generateKey();
+
+  try {
+    const url = `${API_URL}/addkey`;
+    console.log(`[GENKEY] Calling: ${url}`);
+
+    const res = await fetch(url, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ key, duration: durasiDetik, secret: API_SECRET }),
+    });
+
+    console.log(`[GENKEY] Status: ${res.status}`);
+    const text = await res.text();
+    console.log(`[GENKEY] Response: ${text}`);
+
+    const data = JSON.parse(text);
+
+    if (!data.success)
+      return interaction.editReply({
+        content: `❌ Gagal: ${data.message || data.reason || "Unknown error"}`
+      });
+
+    const scriptReady = `_G.KEY = "${key}"\nloadstring(game:HttpGet("${SCRIPT_URL}"))()`;
+    const expireText = durasiDetik
+      ? `Expired: ${new Date(data.expires).toLocaleString("id-ID")}`
+      : "Key ini tidak akan expired (Permanent)";
+
+    const embed = new EmbedBuilder()
+      .setTitle("✅ Key Berhasil Di-generate!")
+      .setColor(0x00ff99)
+      .addFields(
+        { name: "Key", value: "```" + key + "```" },
+        { name: "Durasi", value: formatDurasi(durasiDetik), inline: true },
+        { name: "Expired", value: expireText, inline: true },
+        { name: "Script - Copy Paste ke Xeno", value: "```lua\n" + scriptReady + "\n```" }
+      )
+      .setTimestamp()
+      .setFooter({ text: `Di-generate oleh ${interaction.user.tag}` });
+
+    return interaction.editReply({ embeds: [embed] });
+
+  } catch (err) {
+    console.error("[GENKEY]", err);
+    return interaction.editReply({
+      content: "❌ Server tidak bisa dihubungi. Cek console untuk detail."
+    });
   }
+}
 
   if (commandName === "checkkey") {
     if (!isAdmin(member)) return safeReply(interaction, { content: "No permission." });
