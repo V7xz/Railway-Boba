@@ -20,9 +20,10 @@ const {
   AttachmentBuilder
 } = require("discord.js");
 
-const fetch = require("node-fetch");
+// HAPUS node-fetch
+const fetch = global.fetch;
 
-// ── CLIENT ────────────────────────────────────────────────────────────────────
+// ── CLIENT ─────────────────────────────
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -31,7 +32,7 @@ const client = new Client({
   ]
 });
 
-// ── ENV ───────────────────────────────────────────────────────────────────────
+// ── ENV ────────────────────────────────
 const TOKEN         = process.env.TOKEN;
 const CLIENT_ID     = process.env.CLIENT_ID;
 const API_URL       = process.env.API_URL;
