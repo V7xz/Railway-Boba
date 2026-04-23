@@ -243,7 +243,7 @@ function buildTranscriptText(channelId, channelName, order) {
   const messages = ticketMessages.get(channelId) || [];
   const lines = [
     `══════════════════════════════════════`,
-    `  BOBA SHOP — TICKET TRANSCRIPT`,
+    `  Phantom.wtf — TICKET TRANSCRIPT`,
     `══════════════════════════════════════`,
     `Channel   : #${channelName}`,
     `Channel ID: ${channelId}`,
@@ -473,7 +473,6 @@ const ADMIN_PERM = PermissionsBitField.Flags.Administrator.toString();
 
 const commands = [
   // ── Shop Bot Commands ──────────────────────────────────────────────────────
-  new SlashCommandBuilder().setName("shop").setDescription("Browse the shop and place an order"),
   new SlashCommandBuilder().setName("setup-support").setDescription("Post the support panel to this channel").setDefaultMemberPermissions(ADMIN_PERM),
   new SlashCommandBuilder().setName("setup-transcript").setDescription("Set this channel as the transcript destination").setDefaultMemberPermissions(ADMIN_PERM),
   new SlashCommandBuilder().setName("dashboard").setDescription("View all active orders").setDefaultMemberPermissions(ADMIN_PERM),
@@ -601,10 +600,6 @@ async function handleSlash(interaction) {
 
   // ── Shop Bot Commands ──────────────────────────────────────────────────────
 
-  if (commandName === "shop") {
-    return interaction.reply({ embeds: [buildShopEmbed()], components: [buildShopRow()], flags: 64 });
-  }
-
   if (commandName === "setup-support") {
     if (!isAdmin(member)) return safeReply(interaction, { content: "❌ Admin only." });
     await channel.send({ embeds: [buildSupportEmbed()], components: [buildSupportRow()] });
@@ -701,130 +696,57 @@ async function handleSlash(interaction) {
 
   // ── Key Bot Commands ───────────────────────────────────────────────────────
 
-  if (commandName === "genkey") {
-    if (!isAdminByRole(interaction))
-      return interaction.reply({ content: "Kamu tidak punya izin!", ephemeral: true });
+ if (commandName === "genkey") {
+  if (!isAdminByRole(interaction))
+    return interaction.reply({ content: "Kamu tidak punya izin!", ephemeral: true });
 
-    const durasiStr   = interaction.options.getString("durasi") || "1d";
-    const durasiDetik = parseDurasi(durasiStr);
-    const key         = generateKey();
+  const durasiStr   = interaction.options.getString("durasi") || "1d";
+  const durasiDetik = parseDurasi(durasiStr);
+  const key         = generateKey();
 
-    try {
-      const res  = await fetch(`${API_URL}/addkey`, {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ key, duration: durasiDetik, secret: API_SECRET }),
-      });
-      const data = await res.json();
+  try {
+    const res  = await fetch(`${API_URL}/addkey`, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body:    JSON.stringify({ key, duration: durasiDetik, secret: API_SECRET }),
+    });
 
-      if (!data.success)
-        return interaction.reply({ content: `Gagal: ${data.reason}`, ephemeral: true });
+    const data = await res.json();
 
-      const scriptReady = `_G.KEY = "${key}"\nloadstring(game:HttpGet("${SCRIPT_URL}"))()`;
-
-      const expireText = durasiDetik
-        ? `Expired: ${new Date(data.expires).toLocaleString("id-ID")}`
-        : "Key ini tidak akan expired (Permanent)";
-
-      const embed = new EmbedBuilder()
-        .setTitle("Key Berhasil Di-generate!")
-        .setColor(0x00ff99)
-        .addFields(
-          { name: "Key",    value: "```" + key + "```" },
-          { name: "Durasi", value: formatDurasi(durasiDetik), inline: true },
-          { name: "Expired", value: expireText, inline: true },
-          { name: "Script - Copy Paste ke Xeno", value: "```lua\n" + scriptReady + "\n```" },
-        )
-        .setTimestamp()
-        .setFooter({ text: `Di-generate oleh ${interaction.user.tag}` });
-
-      return interaction.reply({ embeds: [embed], ephemeral: true });
-
-    } catch (err) {
-      console.error(err);
+    if (!data.success)
       return interaction.reply({
-        content: "Server tidak bisa dihubungi. Pastikan node server.js dan ngrok jalan!",
-        ephemeral: true,
+        content: `Gagal: ${data.message || data.reason || "Unknown error"}`,
+        ephemeral: true
       });
-    }
-  }
 
-  if (commandName === "revokekey") {
-    if (!isAdminByRole(interaction))
-      return interaction.reply({ content: "Kamu tidak punya izin!", ephemeral: true });
+    const scriptReady = `_G.KEY = "${key}"\nloadstring(game:HttpGet("${SCRIPT_URL}"))()`;
 
-    const key = interaction.options.getString("key").toUpperCase().trim();
+    const expireText = durasiDetik
+      ? `Expired: ${new Date(data.expires).toLocaleString("id-ID")}`
+      : "Key ini tidak akan expired (Permanent)";
 
-    try {
-      const res  = await fetch(`${API_URL}/revokekey`, {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ key, secret: API_SECRET }),
-      });
-      const data = await res.json();
+    const embed = new EmbedBuilder()
+      .setTitle("Key Berhasil Di-generate!")
+      .setColor(0x00ff99)
+      .addFields(
+        { name: "Key", value: "```" + key + "```" },
+        { name: "Durasi", value: formatDurasi(durasiDetik), inline: true },
+        { name: "Expired", value: expireText, inline: true },
+        { name: "Script - Copy Paste ke Xeno", value: "```lua\n" + scriptReady + "\n```" },
+      )
+      .setTimestamp()
+      .setFooter({ text: `Di-generate oleh ${interaction.user.tag}` });
 
-      if (!data.success)
-        return interaction.reply({ content: `Gagal hapus key: ${data.reason}`, ephemeral: true });
+    return interaction.reply({ embeds: [embed], ephemeral: true });
 
-      return interaction.reply({ content: `Key \`${key}\` berhasil dihapus!`, ephemeral: true });
-    } catch {
-      return interaction.reply({ content: "Server tidak bisa dihubungi!", ephemeral: true });
-    }
-  }
-
-  if (commandName === "checkkey") {
-    const key = interaction.options.getString("key").toUpperCase().trim();
-
-    try {
-      const res  = await fetch(`${API_URL}/verify?key=${key}&hwid=check`);
-      const data = await res.json();
-
-      if (data.valid) {
-        const expireInfo = data.expires
-          ? `Expired: ${new Date(data.expires).toLocaleString("id-ID")}`
-          : "Permanent";
-        return interaction.reply({
-          content: `Key \`${key}\` VALID!\n${expireInfo}`,
-          ephemeral: true,
-        });
-      } else {
-        return interaction.reply({
-          content: `Key \`${key}\` tidak valid\nAlasan: ${data.reason}`,
-          ephemeral: true,
-        });
-      }
-    } catch {
-      return interaction.reply({ content: "Server tidak bisa dihubungi!", ephemeral: true });
-    }
-  }
-
-  if (commandName === "resethwid") {
-    if (!isAdminByRole(interaction))
-      return interaction.reply({ content: "Kamu tidak punya izin!", ephemeral: true });
-
-    const key = interaction.options.getString("key").toUpperCase().trim();
-
-    try {
-      const res  = await fetch(`${API_URL}/resethwid`, {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ key, secret: API_SECRET }),
-      });
-      const data = await res.json();
-
-      if (!data.success)
-        return interaction.reply({ content: `Gagal reset HWID: ${data.reason}`, ephemeral: true });
-
-      return interaction.reply({
-        content: `HWID key \`${key}\` berhasil direset! User sekarang bisa pakai di PC baru.`,
-        ephemeral: true,
-      });
-    } catch {
-      return interaction.reply({ content: "Server tidak bisa dihubungi!", ephemeral: true });
-    }
+  } catch (err) {
+    console.error(err);
+    return interaction.reply({
+      content: "Server tidak bisa dihubungi. Pastikan node server.js dan ngrok jalan!",
+      ephemeral: true,
+    });
   }
 }
-
 // ── BUTTON HANDLERS ───────────────────────────────────────────────────────────
 async function handleButton(interaction) {
   const { customId, guild, user, member, channel } = interaction;
@@ -1181,11 +1103,11 @@ async function handleSelect(interaction) {
           .setColor(0x5865f2)
           .setDescription("Please select how long you'd like access to this script.")
           .addFields(
-            { name: "1 Day",    value: `${fmt.price(3.99)}`,  inline: true },
-            { name: "3 Days",   value: `${fmt.price(7.99)}`,  inline: true },
-            { name: "7 Days",   value: `${fmt.price(12.99)}`, inline: true },
-            { name: "1 Month",  value: `${fmt.price(24.99)}`, inline: true },
-            { name: "Lifetime", value: `${fmt.price(39.99)}`, inline: true }
+            { name: "1 Day",    value: `${fmt.price(10.000)}`,  inline: true },
+            { name: "3 Days",   value: `${fmt.price(20.000)}`,  inline: true },
+            { name: "7 Days",   value: `${fmt.price(35.000)}`, inline: true },
+            { name: "1 Month",  value: `${fmt.price(100.000)}`, inline: true },
+            { name: "Lifetime", value: `${fmt.price(150.000)}`, inline: true }
           )
           .setFooter({ text: "Select a duration below to continue." })
           .setTimestamp()
