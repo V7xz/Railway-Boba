@@ -18,7 +18,12 @@ const {
   StringSelectMenuBuilder,
   PermissionsBitField,
   ChannelType,
-  ActivityType
+  ActivityType,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+  Collection,
+  AttachmentBuilder
 } = require("discord.js");
 
 /* =====================================================
@@ -30,7 +35,7 @@ const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 const API_URL = process.env.API_URL;
 const API_SECRET = process.env.API_SECRET;
-const LOADER_URL = process.env.LOADER_URL;
+const LOADER_URL = process.env.LOADER_URL || "";
 const BANNER_URL = process.env.BANNER_URL || "";
 const QRIS_IMAGE = process.env.QRIS_IMAGE || "https://cdn.discordapp.com/attachments/1491728132661842061/1491880425923153991/Qris_gw.png";
 const PAYPAL_EMAIL = process.env.PAYPAL_EMAIL || "phantom.wtfff@gmail.com";
@@ -46,7 +51,10 @@ const CONFIG = {
   ADMIN_ROLE_NAME: "dev",
   AUTO_CLOSE_HOURS: 24,
   CURRENCY_RATE: 17000,
-  BUYER_ROLE_NAME: "Subscriptions"
+  BUYER_ROLE_NAME: "Subscriptions",
+  COOLDOWN_MS: 3000,
+  MAX_OPEN_TICKETS_PER_USER: 2,
+  TRANSCRIPT_CHANNEL_NAME: "transcript"
 };
 
 const COLORS = {
@@ -61,6 +69,8 @@ const COLORS = {
 const COLOR_MAIN = COLORS.main;
 const COLOR_RED = COLORS.red;
 const COLOR_GREEN = COLORS.green;
+const COLOR_YELLOW = COLORS.yellow;
+const COLOR_GRAY = COLORS.gray;
 
 /* =====================================================
    CLIENT
@@ -76,7 +86,7 @@ const client = new Client({
 });
 
 /* =====================================================
-   STORAGE
+   STORAGE & CACHE
 ===================================================== */
 
 const DATA_DIR = path.join(__dirname, "data");
@@ -85,7 +95,8 @@ const FILES = {
   orders: path.join(DATA_DIR, "orders.json"),
   keys: path.join(DATA_DIR, "keys.json"),
   reviews: path.join(DATA_DIR, "reviews.json"),
-  logs: path.join(DATA_DIR, "logs.json")
+  logs: path.join(DATA_DIR, "logs.json"),
+  transcript: path.join(DATA_DIR, "transcripts.json")
 };
 
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR);
@@ -106,17 +117,19 @@ function writeJSON(file, data) {
   fs.writeFileSync(file, JSON.stringify(data, null, 2));
 }
 
-/* =====================================================
-   MEMORY CACHE
-===================================================== */
-
 let orders = readJSON(FILES.orders);
 let keys = readJSON(FILES.keys);
 let reviews = readJSON(FILES.reviews);
 let logs = readJSON(FILES.logs);
+let transcripts = readJSON(FILES.transcript);
 
 let logChannelId = null;
 let reviewChannelId = null;
+let transcriptChannelId = null;
+
+const ticketMessages = new Map(); // channelId -> array of messages for transcript
+const activityMap = new Map(); // channelId -> last activity timestamp
+const commandCooldown = new Collection();
 
 /* =====================================================
    UTILITIES
@@ -147,6 +160,7 @@ function saveAll() {
   writeJSON(FILES.keys, keys);
   writeJSON(FILES.reviews, reviews);
   writeJSON(FILES.logs, logs);
+  writeJSON(FILES.transcript, transcripts);
 }
 
 function findOrder(channelId) {
@@ -179,8 +193,100 @@ function moneyUSD(n) {
   return `$${Number(n).toFixed(2)}`;
 }
 
+function statusBadge(s) {
+  return {
+    payment:  "💳 Awaiting Payment",
+    waiting:  "⏳ Payment Submitted",
+    approved: "✅ Approved",
+    rejected: "❌ Rejected",
+    closed:   "🚫 Closed",
+    cancelled:"🚫 Cancelled"
+  }[s] || s;
+}
+
+function onCooldown(userId) {
+  const now = Date.now();
+  const last = commandCooldown.get(userId) || 0;
+  if (now - last < CONFIG.COOLDOWN_MS) return true;
+  commandCooldown.set(userId, now);
+  return false;
+}
+
+async function safeReply(interaction, payload) {
+  try {
+    if (interaction.replied || interaction.deferred) {
+      return await interaction.followUp({ ...payload, ephemeral: true });
+    }
+    return await interaction.reply({ ...payload, ephemeral: true });
+  } catch (e) {
+    console.error("[safeReply]", e.message);
+  }
+}
+
+// Track messages for transcripts
+function trackMessage(channelId, author, content) {
+  if (!ticketMessages.has(channelId)) ticketMessages.set(channelId, []);
+  ticketMessages.get(channelId).push({ author, content, timestamp: new Date().toISOString() });
+}
+
+function buildTranscriptText(channelId, channelName, order) {
+  const messages = ticketMessages.get(channelId) || [];
+  const lines = [
+    `══════════════════════════════════════`,
+    `  ${CONFIG.BOT_NAME} — TICKET TRANSCRIPT`,
+    `══════════════════════════════════════`,
+    `Channel   : #${channelName}`,
+    `Channel ID: ${channelId}`,
+    order
+      ? [`Order ID  : #${order.orderId}`, `Product   : ${order.product} (${order.variant || "N/A"})`,
+         `Price     : ${moneyIDR(order.price)}`, `Customer  : ${order.userId}`,
+         `Status    : ${statusBadge(order.status)}`, `Payment   : ${order.paymentMethod || "N/A"}`,
+         `Opened    : ${new Date(order.created).toUTCString()}`].join("\n")
+      : `Type      : Support Ticket`,
+    `══════════════════════════════════════`,
+    `MESSAGES (${messages.length} total)`,
+    `══════════════════════════════════════`,
+    ...messages.map(m => `[${m.timestamp}] ${m.author}\n  ${m.content}`),
+    `══════════════════════════════════════`,
+    `  END OF TRANSCRIPT`,
+    `══════════════════════════════════════`
+  ];
+  return lines.join("\n");
+}
+
+async function sendTranscript(guild, channelId, channelName, closedBy) {
+  const transcriptCh = transcriptChannelId
+    ? guild.channels.cache.get(transcriptChannelId) || guild.channels.cache.find(c => c.name === CONFIG.TRANSCRIPT_CHANNEL_NAME)
+    : guild.channels.cache.find(c => c.name === CONFIG.TRANSCRIPT_CHANNEL_NAME);
+  if (!transcriptCh) return;
+
+  const order = findOrder(channelId) || null;
+  const text = buildTranscriptText(channelId, channelName, order);
+  const buffer = Buffer.from(text, "utf-8");
+  const attachment = new AttachmentBuilder(buffer, { name: `transcript-${channelName}.txt` });
+
+  const embed = new EmbedBuilder()
+    .setTitle("📄 Ticket Transcript")
+    .setColor(COLOR_MAIN)
+    .addFields(
+      { name: "Channel", value: `#${channelName}`, inline: true },
+      { name: "Closed By", value: closedBy ? `<@${closedBy}>` : "Auto", inline: true },
+      { name: "Messages", value: `${(ticketMessages.get(channelId) || []).length}`, inline: true }
+    );
+  if (order) {
+    embed.addFields(
+      { name: "Order", value: `#${order.orderId}`, inline: true },
+      { name: "Product", value: `${order.product} (${order.variant || ""})`, inline: true },
+      { name: "Status", value: statusBadge(order.status), inline: true }
+    );
+  }
+  embed.setTimestamp();
+  await transcriptCh.send({ embeds: [embed], files: [attachment] }).catch(() => {});
+  ticketMessages.delete(channelId);
+}
+
 /* =====================================================
-   EMBEDS
+   EMBED BUILDERS
 ===================================================== */
 
 function mainPanel() {
@@ -205,7 +311,7 @@ function supportPanel() {
   return new EmbedBuilder()
     .setColor(COLOR_MAIN)
     .setTitle("🎫 Phantom Support")
-    .setDescription("Need help? Open support ticket below.");
+    .setDescription("Need help? Open a private support ticket below.");
 }
 
 function dashboardEmbed(guild) {
@@ -219,11 +325,21 @@ function dashboardEmbed(guild) {
     .setColor(COLOR_MAIN)
     .setTitle("📊 Phantom Dashboard")
     .addFields(
-      { name: "Open Orders", value: `${pending}`, inline: true },
+      { name: "Pending Orders", value: `${pending}`, inline: true },
       { name: "Approved Today", value: `${approved}`, inline: true },
       { name: "Guild", value: guild.name, inline: true }
     )
     .setTimestamp();
+}
+
+function buildPaymentEmbed(order, method) {
+  return new EmbedBuilder()
+    .setTitle(`${method.emoji || "💳"} ${method.label} — Payment Instructions`)
+    .setColor(COLOR_MAIN)
+    .setDescription(method.instructions)
+    .addFields({ name: "Amount Due", value: moneyIDR(order.price), inline: true })
+    .setFooter({ text: "After paying, click I've Paid ✅" })
+    .setImage(method.image || null);
 }
 
 /* =====================================================
@@ -233,15 +349,23 @@ function dashboardEmbed(guild) {
 const commands = [
   new SlashCommandBuilder().setName("setup").setDescription("Send main shop panel"),
   new SlashCommandBuilder().setName("setupsupport").setDescription("Send support panel"),
-  new SlashCommandBuilder().setName("setuplogs").setDescription("Set current channel as logs"),
-  new SlashCommandBuilder().setName("setupreviews").setDescription("Set current channel as reviews"),
+  new SlashCommandBuilder().setName("setuplogs").setDescription("Set current channel as log channel"),
+  new SlashCommandBuilder().setName("setupreviews").setDescription("Set current channel as review channel"),
+  new SlashCommandBuilder().setName("setuptranscript").setDescription("Set current channel as transcript destination"),
   new SlashCommandBuilder().setName("dashboard").setDescription("View live stats"),
-  new SlashCommandBuilder().setName("claim").setDescription("Claim ticket"),
-  new SlashCommandBuilder().setName("close").setDescription("Close current ticket"),
+  new SlashCommandBuilder().setName("claim").setDescription("Claim this ticket"),
+  new SlashCommandBuilder().setName("close").setDescription("Close current ticket (generates transcript)"),
   new SlashCommandBuilder()
     .setName("say")
     .setDescription("Bot send custom message")
     .addStringOption(o => o.setName("message").setDescription("Message").setRequired(true)),
+  new SlashCommandBuilder()
+    .setName("accept")
+    .setDescription("Approve payment in this ticket"),
+  new SlashCommandBuilder()
+    .setName("reject")
+    .setDescription("Reject payment in this ticket")
+    .addStringOption(o => o.setName("reason").setDescription("Reason").setRequired(false)),
   new SlashCommandBuilder()
     .setName("genkey")
     .setDescription("Generate script key")
@@ -291,24 +415,28 @@ client.once("ready", async () => {
 
   // Auto close inactive tickets
   setInterval(async () => {
+    const now = Date.now();
     for (const data of orders) {
-      if (["approved", "closed", "rejected"].includes(data.status)) continue;
-      const diff = Date.now() - data.created;
-      if (diff > CONFIG.AUTO_CLOSE_HOURS * 3600000) {
-        const ch = client.channels.cache.get(data.channelId);
-        if (!ch) continue;
-        await ch.send({
-          embeds: [
-            new EmbedBuilder()
-              .setColor(COLOR_RED)
-              .setTitle("⏰ Auto Closed")
-              .setDescription("Ticket closed due to inactivity.")
-          ]
-        }).catch(() => null);
-        await closeTicket(ch, "Auto Closed");
-      }
+      if (["approved", "closed", "rejected", "cancelled"].includes(data.status)) continue;
+      const last = activityMap.get(data.channelId) || data.created;
+      if (now - last < CONFIG.AUTO_CLOSE_HOURS * 3600000) continue;
+      const ch = client.channels.cache.get(data.channelId);
+      if (!ch) continue;
+      data.status = "cancelled";
+      saveAll();
+      trackMessage(data.channelId, "SYSTEM", `[AUTO-CLOSE] Ticket closed after ${CONFIG.AUTO_CLOSE_HOURS}h of inactivity.`);
+      await ch.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(COLOR_RED)
+            .setTitle("⏰ Auto Closed")
+            .setDescription(`Ticket closed due to **${CONFIG.AUTO_CLOSE_HOURS}h** of inactivity.`)
+        ]
+      }).catch(() => {});
+      await sendTranscript(ch.guild, data.channelId, ch.name, null);
+      await ch.setName(`expired-${ch.name.split("-").pop()}`).catch(() => {});
     }
-  }, 1800000);
+  }, 30 * 60 * 1000);
 });
 
 /* =====================================================
@@ -318,8 +446,15 @@ client.once("ready", async () => {
 client.on("interactionCreate", async (interaction) => {
   try {
     if (interaction.isChatInputCommand()) return await handleSlash(interaction);
-    if (interaction.isButton()) return await handleButton(interaction);
-    if (interaction.isStringSelectMenu()) return await handleSelect(interaction);
+    if (interaction.isButton()) {
+      if (onCooldown(interaction.user.id)) return safeReply(interaction, { content: "⏳ Slow down a bit." });
+      return await handleButton(interaction);
+    }
+    if (interaction.isStringSelectMenu()) {
+      if (onCooldown(interaction.user.id)) return safeReply(interaction, { content: "⏳ Slow down a bit." });
+      return await handleSelect(interaction);
+    }
+    if (interaction.isModalSubmit()) return await handleModal(interaction);
   } catch (err) {
     console.error(err);
     const payload = { content: "❌ Something went wrong.", ephemeral: true };
@@ -338,117 +473,214 @@ client.on("interactionCreate", async (interaction) => {
 async function handleSlash(interaction) {
   const { commandName, member, channel, guild, options } = interaction;
 
+  // ── Shop Bot Commands ──────────────────────────────────────────────────────
+
   if (commandName === "setup") {
-    if (!isAdmin(member)) return interaction.reply({ content: "No permission.", ephemeral: true });
+    if (!isAdmin(member)) return safeReply(interaction, { content: "No permission." });
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId("buy_script").setLabel("Buy Script").setStyle(ButtonStyle.Success).setEmoji("🛒"),
       new ButtonBuilder().setCustomId("open_support").setLabel("Support").setStyle(ButtonStyle.Primary).setEmoji("🎫"),
       new ButtonBuilder().setCustomId("view_prices").setLabel("Pricing").setStyle(ButtonStyle.Secondary).setEmoji("💰")
     );
     await channel.send({ embeds: [mainPanel()], components: [row] });
-    return interaction.reply({ content: "✅ Shop panel sent.", ephemeral: true });
+    return safeReply(interaction, { content: "✅ Shop panel sent." });
   }
 
   if (commandName === "setupsupport") {
-    if (!isAdmin(member)) return interaction.reply({ content: "No permission.", ephemeral: true });
+    if (!isAdmin(member)) return safeReply(interaction, { content: "No permission." });
     const row = new ActionRowBuilder().addComponents(
       new ButtonBuilder().setCustomId("open_support").setLabel("Open Support").setStyle(ButtonStyle.Primary).setEmoji("🎫")
     );
     await channel.send({ embeds: [supportPanel()], components: [row] });
-    return interaction.reply({ content: "✅ Support panel sent.", ephemeral: true });
+    return safeReply(interaction, { content: "✅ Support panel sent." });
   }
 
   if (commandName === "setuplogs") {
-    if (!isAdmin(member)) return interaction.reply({ content: "No permission.", ephemeral: true });
+    if (!isAdmin(member)) return safeReply(interaction, { content: "No permission." });
     logChannelId = channel.id;
     saveAll();
-    return interaction.reply({ content: "✅ Logs channel set.", ephemeral: true });
+    return safeReply(interaction, { content: "✅ Logs channel set." });
   }
 
   if (commandName === "setupreviews") {
-    if (!isAdmin(member)) return interaction.reply({ content: "No permission.", ephemeral: true });
+    if (!isAdmin(member)) return safeReply(interaction, { content: "No permission." });
     reviewChannelId = channel.id;
     saveAll();
-    return interaction.reply({ content: "✅ Review channel set.", ephemeral: true });
+    return safeReply(interaction, { content: "✅ Review channel set." });
+  }
+
+  if (commandName === "setuptranscript") {
+    if (!isAdmin(member)) return safeReply(interaction, { content: "No permission." });
+    transcriptChannelId = channel.id;
+    saveAll();
+    return safeReply(interaction, { content: "✅ Transcript channel set." });
   }
 
   if (commandName === "dashboard") {
-    if (!isAdmin(member)) return interaction.reply({ content: "No permission.", ephemeral: true });
+    if (!isAdmin(member)) return safeReply(interaction, { content: "No permission." });
     return interaction.reply({ embeds: [dashboardEmbed(guild)], ephemeral: true });
   }
 
   if (commandName === "claim") {
-    if (!isAdmin(member)) return interaction.reply({ content: "No permission.", ephemeral: true });
-    await channel.send({
-      embeds: [new EmbedBuilder().setColor(COLOR_MAIN).setDescription(`📌 Ticket claimed by <@${interaction.user.id}>`)]
-    });
-    return interaction.reply({ content: "Claimed.", ephemeral: true });
-  }
-
-  if (commandName === "close") {
-    if (!isAdmin(member)) return interaction.reply({ content: "No permission.", ephemeral: true });
-    await interaction.reply({ content: "Closing ticket...", ephemeral: true });
-    return closeTicket(channel, interaction.user.tag);
-  }
-
-  if (commandName === "say") {
-    if (!isAdmin(member)) return interaction.reply({ content: "No permission.", ephemeral: true });
-    await channel.send({ content: options.getString("message") });
-    return interaction.reply({ content: "Sent.", ephemeral: true });
-  }
-
-  if (commandName === "genkey") {
-    if (!isAdmin(member)) return interaction.reply({ content: "No permission.", ephemeral: true });
-    const duration = options.getString("duration");
-    const key = generateKey();
-    const seconds = durationToSeconds(duration);
-    const res = await fetch(`${API_URL}/addkey`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ secret: API_SECRET, key, duration: seconds })
-    }).then(r => r.json()).catch(() => null);
-    if (!res || !res.success) return interaction.reply({ content: "❌ API failed.", ephemeral: true });
-    const script = `_G.KEY="${key}"\nloadstring(game:HttpGet("${LOADER_URL}"))()`;
+    if (!isAdmin(member)) return safeReply(interaction, { content: "No permission." });
+    const data = findOrder(channel.id);
+    if (data) data.claimedBy = interaction.user.id;
+    trackMessage(channel.id, "SYSTEM", `[CLAIMED] Ticket claimed by ${interaction.user.tag}`);
+    await channel.setName(`claimed-${interaction.user.username.slice(0, 20).toLowerCase()}`).catch(() => {});
     return interaction.reply({
-      embeds: [
-        new EmbedBuilder().setColor(COLOR_GREEN).setTitle("✅ Key Generated")
-          .addFields(
-            { name: "Key", value: `\`${key}\`` },
-            { name: "Duration", value: durationLabel(duration), inline: true },
-            { name: "Loader", value: "```lua\n" + script + "\n```" }
-          )
-      ],
+      embeds: [new EmbedBuilder().setColor(COLOR_MAIN).setDescription(`📌 Claimed by <@${interaction.user.id}>`)],
       ephemeral: true
     });
   }
 
+  if (commandName === "close") {
+    if (!isAdmin(member)) return safeReply(interaction, { content: "No permission." });
+    const data = findOrder(channel.id);
+    if (data) data.status = "closed";
+    saveAll();
+    trackMessage(channel.id, "SYSTEM", `[CLOSED] Ticket closed by ${interaction.user.tag}`);
+    await sendTranscript(guild, channel.id, channel.name, interaction.user.id);
+    await interaction.reply({
+      embeds: [new EmbedBuilder().setColor(COLOR_GRAY).setDescription("🚫 Ticket closed. Transcript saved. Deleting in 5 seconds...")],
+      ephemeral: true
+    });
+    setTimeout(() => channel.delete().catch(() => {}), 5000);
+    return;
+  }
+
+  if (commandName === "say") {
+    if (!isAdmin(member)) return safeReply(interaction, { content: "No permission." });
+    const msg = options.getString("message");
+    await channel.send({ content: msg });
+    return safeReply(interaction, { content: "✅ Message sent." });
+  }
+
+  if (commandName === "accept") {
+    if (!isAdmin(member)) return safeReply(interaction, { content: "No permission." });
+    const data = findOrder(channel.id);
+    if (!data) return safeReply(interaction, { content: "No order in this channel." });
+    if (data.status === "approved") return safeReply(interaction, { content: "Already approved." });
+    data.status = "approved";
+    data.approvedAt = Date.now();
+    data.approvedBy = interaction.user.id;
+    saveAll();
+    trackMessage(channel.id, "SYSTEM", `[APPROVED] Payment approved by ${interaction.user.tag}`);
+
+    // Notify customer with product delivery
+    let deliveryContent = "";
+    if (data.product === "South Bronx") {
+      const key = generateKey();
+      const seconds = durationToSeconds(data.duration);
+      // Optional: Register key with API (you can do the same as genkey here or trust staff)
+      // Example: await fetch(...).catch(() => {});
+      deliveryContent = `Here is your script:\n\`\`\`lua\n_G.KEY="${key}"\nloadstring(game:HttpGet("${LOADER_URL}"))()\n\`\`\``;
+    }
+    await channel.send({
+      content: `<@${data.userId}>`,
+      embeds: [
+        new EmbedBuilder()
+          .setColor(COLOR_GREEN)
+          .setTitle("✅ Payment Approved!")
+          .setDescription(`Your **${data.product}** order has been verified!${deliveryContent ? "\n" + deliveryContent : ""}`)
+          .setTimestamp()
+      ],
+      components: [
+        new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`leave_review:${channel.id}`).setLabel("Leave a Review").setStyle(ButtonStyle.Primary).setEmoji("⭐")
+        )
+      ]
+    });
+    await channel.setName(`approved-${interaction.user.username.slice(0, 20).toLowerCase()}`).catch(() => {});
+    return safeReply(interaction, { content: "✅ Approved and customer notified." });
+  }
+
+  if (commandName === "reject") {
+    if (!isAdmin(member)) return safeReply(interaction, { content: "No permission." });
+    const data = findOrder(channel.id);
+    if (!data) return safeReply(interaction, { content: "No order in this channel." });
+    if (data.status === "rejected") return safeReply(interaction, { content: "Already rejected." });
+    const reason = options.getString("reason") || "No reason provided.";
+    data.status = "rejected";
+    data.rejectedAt = Date.now();
+    data.rejectedBy = interaction.user.id;
+    data.rejectionReason = reason;
+    saveAll();
+    trackMessage(channel.id, "SYSTEM", `[REJECTED] Order rejected by ${interaction.user.tag}. Reason: ${reason}`);
+    await channel.send({
+      content: `<@${data.userId}>`,
+      embeds: [
+        new EmbedBuilder()
+          .setColor(COLOR_RED)
+          .setTitle("❌ Payment Rejected")
+          .setDescription(`Your payment could not be verified.\n**Reason:** ${reason}`)
+          .setTimestamp()
+      ]
+    });
+    await channel.setName(`rejected-${interaction.user.username.slice(0, 20).toLowerCase()}`).catch(() => {});
+    return safeReply(interaction, { content: "❌ Rejected." });
+  }
+
+  // ── Key Bot Commands ───────────────────────────────────────────────────────
+
+  if (commandName === "genkey") {
+    if (!isAdmin(member)) return safeReply(interaction, { content: "No permission." });
+    const duration = options.getString("duration");
+    const key = generateKey();
+    const seconds = durationToSeconds(duration);
+    try {
+      const res = await fetch(`${API_URL}/addkey`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ secret: API_SECRET, key, duration: seconds })
+      }).then(r => r.json());
+      if (!res || !res.success) return safeReply(interaction, { content: "❌ API failed." });
+      const script = `_G.KEY="${key}"\nloadstring(game:HttpGet("${LOADER_URL}"))()`;
+      const embed = new EmbedBuilder()
+        .setColor(COLOR_GREEN)
+        .setTitle("✅ Key Generated")
+        .addFields(
+          { name: "Key", value: `\`${key}\`` },
+          { name: "Duration", value: durationLabel(duration), inline: true },
+          { name: "Loader", value: "```lua\n" + script + "\n```" }
+        )
+        .setTimestamp();
+      return interaction.reply({ embeds: [embed], ephemeral: true });
+    } catch (e) {
+      console.error(e);
+      return safeReply(interaction, { content: "Server unreachable." });
+    }
+  }
+
   if (commandName === "checkkey") {
-    if (!isAdmin(member)) return interaction.reply({ content: "No permission.", ephemeral: true });
+    if (!isAdmin(member)) return safeReply(interaction, { content: "No permission." });
     const key = options.getString("key");
     const res = await fetch(`${API_URL}/check?key=${key}&secret=${API_SECRET}`).then(r => r.json()).catch(() => null);
-    return interaction.reply({ content: "```json\n" + JSON.stringify(res, null, 2) + "\n```", ephemeral: true });
+    return interaction.reply({
+      content: "```json\n" + JSON.stringify(res, null, 2).substring(0, 2000) + "\n```",
+      ephemeral: true
+    });
   }
 
   if (commandName === "revokekey") {
-    if (!isAdmin(member)) return interaction.reply({ content: "No permission.", ephemeral: true });
+    if (!isAdmin(member)) return safeReply(interaction, { content: "No permission." });
     const key = options.getString("key");
     await fetch(`${API_URL}/revoke`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ secret: API_SECRET, key })
-    }).catch(() => null);
-    return interaction.reply({ content: "✅ Key revoked.", ephemeral: true });
+    }).catch(() => {});
+    return safeReply(interaction, { content: "✅ Key revoked." });
   }
 
   if (commandName === "resethwid") {
-    if (!isAdmin(member)) return interaction.reply({ content: "No permission.", ephemeral: true });
+    if (!isAdmin(member)) return safeReply(interaction, { content: "No permission." });
     const key = options.getString("key");
     await fetch(`${API_URL}/resethwid`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ secret: API_SECRET, key })
-    }).catch(() => null);
-    return interaction.reply({ content: "✅ HWID reset.", ephemeral: true });
+    }).catch(() => {});
+    return safeReply(interaction, { content: "✅ HWID reset." });
   }
 }
 
@@ -457,7 +689,8 @@ async function handleSlash(interaction) {
 ===================================================== */
 
 async function handleButton(interaction) {
-  const { customId, guild, user, member } = interaction;
+  const { customId, guild, user, member, channel } = interaction;
+  activityMap.set(channel.id, Date.now());
 
   if (customId === "buy_script") {
     const menu = new StringSelectMenuBuilder()
@@ -472,95 +705,13 @@ async function handleButton(interaction) {
   }
 
   if (customId === "open_support") {
+    // Check ticket limit
+    const openCount = orders.filter(o => o.userId === user.id && ["payment", "waiting", "approved"].includes(o.status)).length;
+    if (openCount >= CONFIG.MAX_OPEN_TICKETS_PER_USER) {
+      return safeReply(interaction, { content: `❌ You already have ${CONFIG.MAX_OPEN_TICKETS_PER_USER} open tickets.` });
+    }
     const ch = await guild.channels.create({
-      name: `support-${user.username}`.toLowerCase(),
-      type: ChannelType.GuildText,
-      permissionOverwrites: [
-        { id: guild.id, deny: [PermissionsBitField.Flags.ViewChannel] },
-        { id: user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] }
-      ]
-    });
-    await ch.send({
-      content: `<@${user.id}>`,
-      embeds: [new EmbedBuilder().setColor(COLORS.main).setTitle("🎫 Support Ticket").setDescription("Describe your issue.")]
-    });
-    return interaction.reply({ content: `Ticket created: ${ch}`, ephemeral: true });
-  }
-
-  if (customId === "view_prices") {
-    return interaction.reply({
-      embeds: [
-        new EmbedBuilder().setColor(COLORS.main).setTitle("💰 Pricing").setDescription(`
-**South Bronx**
-1 Day — Rp10.000
-3 Day — Rp20.000
-7 Day — Rp35.000
-30 Day — Rp100.000
-Lifetime — Rp150.000
-`)
-      ],
-      ephemeral: true
-    });
-  }
-
-  if (customId.startsWith("paid_")) {
-    const ticketId = customId.split("_")[1];
-    const data = findOrder(ticketId);
-    if (!data) return interaction.reply({ content: "Order not found.", ephemeral: true });
-    data.status = "waiting";
-    saveAll();
-    return interaction.reply({ content: "Payment submitted.", ephemeral: true });
-  }
-
-  if (customId.startsWith("approve_")) {
-    if (!isAdmin(member)) return interaction.reply({ content: "No permission.", ephemeral: true });
-    const ticketId = customId.split("_")[1];
-    const data = findOrder(ticketId);
-    if (!data) return interaction.reply({ content: "Order not found.", ephemeral: true });
-    data.status = "approved";
-    saveAll();
-    return interaction.reply({ content: "Approved.", ephemeral: true });
-  }
-
-  if (customId.startsWith("reject_")) {
-    if (!isAdmin(member)) return interaction.reply({ content: "No permission.", ephemeral: true });
-    const ticketId = customId.split("_")[1];
-    const data = findOrder(ticketId);
-    if (!data) return interaction.reply({ content: "Order not found.", ephemeral: true });
-    data.status = "rejected";
-    saveAll();
-    return interaction.reply({ content: "Rejected.", ephemeral: true });
-  }
-}
-
-/* =====================================================
-   SELECT MENU HANDLER
-===================================================== */
-
-async function handleSelect(interaction) {
-  const { customId, guild, user } = interaction;
-
-  if (customId === "choose_product") {
-    const durationMenu = new StringSelectMenuBuilder()
-      .setCustomId("choose_duration")
-      .setPlaceholder("Select duration")
-      .addOptions([
-        { label: "1 Day", value: "1d" },
-        { label: "3 Day", value: "3d" },
-        { label: "7 Day", value: "7d" },
-        { label: "30 Day", value: "30d" },
-        { label: "Lifetime", value: "perm" }
-      ]);
-    return interaction.update({
-      content: "Choose duration",
-      components: [new ActionRowBuilder().addComponents(durationMenu)]
-    });
-  }
-
-  if (customId === "choose_duration") {
-    const dur = interaction.values[0];
-    const ch = await guild.channels.create({
-      name: `order-${user.username}`.toLowerCase(),
+      name: `support-${user.username}`.substring(0, 32).toLowerCase(),
       type: ChannelType.GuildText,
       permissionOverwrites: [
         { id: guild.id, deny: [PermissionsBitField.Flags.ViewChannel] },
@@ -570,29 +721,451 @@ async function handleSelect(interaction) {
     orders.push({
       channelId: ch.id,
       userId: user.id,
-      product: "South Bronx",
-      duration: dur,
-      status: "payment",
+      product: "Support",
+      status: "open",
       created: Date.now()
     });
     saveAll();
-    return interaction.update({ content: `Order created: ${ch}`, components: [] });
+    trackMessage(ch.id, "SYSTEM", `[OPENED] Support ticket by ${user.tag}`);
+    await ch.send({
+      content: `<@${user.id}>`,
+      embeds: [
+        new EmbedBuilder()
+          .setColor(COLOR_MAIN)
+          .setTitle("🎫 Support Ticket")
+          .setDescription("Describe your issue. Staff will assist shortly.")
+      ],
+      components: [
+        new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId("close_support").setLabel("Close Ticket").setStyle(ButtonStyle.Danger).setEmoji("🔒")
+        )
+      ]
+    });
+    return safeReply(interaction, { content: `✅ Support ticket created: ${ch}` });
+  }
+
+  if (customId === "view_prices") {
+    const embed = new EmbedBuilder()
+      .setColor(COLOR_MAIN)
+      .setTitle("💰 Pricing")
+      .setDescription(`
+**South Bronx**
+1 Day — Rp10.000
+3 Day — Rp20.000
+7 Day — Rp35.000
+30 Day — Rp100.000
+Lifetime — Rp150.000
+`);
+    return interaction.reply({ embeds: [embed], ephemeral: true });
+  }
+
+  if (customId === "close_support") {
+    if (!isAdmin(member)) return safeReply(interaction, { content: "No permission." });
+    trackMessage(channel.id, "SYSTEM", `[CLOSED] Support ticket closed by ${user.tag}`);
+    await sendTranscript(guild, channel.id, channel.name, user.id);
+    await interaction.reply({ content: "🚫 Transcript saved. Deleting in 5 seconds...", ephemeral: true });
+    setTimeout(() => channel.delete().catch(() => {}), 5000);
+    return;
+  }
+
+  // Payment flow buttons (I've Paid)
+  if (customId.startsWith("paid_")) {
+    const ticketId = customId.split("_")[1];
+    const data = findOrder(ticketId);
+    if (!data) return safeReply(interaction, { content: "Order not found." });
+    if (data.userId !== user.id) return safeReply(interaction, { content: "Not your order." });
+    if (data.status !== "payment") return safeReply(interaction, { content: "Already submitted." });
+    data.status = "waiting";
+    data.paidAt = Date.now();
+    saveAll();
+    trackMessage(ticketId, user.tag, `[PAID] Marked payment as sent`);
+    await interaction.reply({ content: "✅ Payment submitted. Awaiting admin verification.", ephemeral: true });
+
+    const logCh = logChannelId ? guild.channels.cache.get(logChannelId) : null;
+    if (logCh) {
+      logCh.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(COLOR_YELLOW)
+            .setTitle(`💸 Payment Submitted — #${data.orderId}`)
+            .setDescription(`<@${user.id}> marked their order as paid.`)
+            .addFields(
+              { name: "Product", value: `${data.product} (${data.variant || ""})`, inline: true },
+              { name: "Price", value: moneyIDR(data.price), inline: true },
+              { name: "Channel", value: `<#${ticketId}>`, inline: true }
+            )
+            .setTimestamp()
+        ],
+        components: [
+          new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`approve_${ticketId}`).setLabel("Approve").setStyle(ButtonStyle.Success).setEmoji("✅"),
+            new ButtonBuilder().setCustomId(`reject_${ticketId}`).setLabel("Reject").setStyle(ButtonStyle.Danger).setEmoji("❌")
+          )
+        ]
+      });
+    }
+    const targetCh = guild.channels.cache.get(ticketId);
+    if (targetCh) {
+      targetCh.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(COLOR_YELLOW)
+            .setTitle("💸 Payment Submitted")
+            .setDescription("Your payment is under review. An admin will verify it shortly.")
+        ]
+      });
+    }
+    return;
+  }
+
+  // Admin approve from log channel
+  if (customId.startsWith("approve_")) {
+    if (!isAdmin(member)) return safeReply(interaction, { content: "No permission." });
+    const ticketId = customId.split("_")[1];
+    const data = findOrder(ticketId);
+    if (!data) return safeReply(interaction, { content: "Order not found." });
+    if (data.status === "approved") return safeReply(interaction, { content: "Already approved." });
+    data.status = "approved";
+    data.approvedAt = Date.now();
+    data.approvedBy = user.id;
+    saveAll();
+    trackMessage(ticketId, "SYSTEM", `[APPROVED] Payment approved by ${user.tag}`);
+
+    const targetCh = guild.channels.cache.get(ticketId);
+    if (targetCh) {
+      let delivery = "";
+      if (data.product === "South Bronx") {
+        const key = generateKey();
+        // optional API call same as genkey
+        delivery = `\n\`\`\`lua\n_G.KEY="${key}"\nloadstring(game:HttpGet("${LOADER_URL}"))()\n\`\`\``;
+      }
+      targetCh.send({
+        content: `<@${data.userId}>`,
+        embeds: [
+          new EmbedBuilder()
+            .setColor(COLOR_GREEN)
+            .setTitle("✅ Payment Approved!")
+            .setDescription(`Your **${data.product}** order has been verified!${delivery}`)
+        ],
+        components: [
+          new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId(`leave_review:${ticketId}`).setLabel("Leave a Review").setStyle(ButtonStyle.Primary).setEmoji("⭐")
+          )
+        ]
+      });
+    }
+    try {
+      await interaction.update({
+        embeds: [new EmbedBuilder().setColor(COLOR_GREEN).setDescription(`✅ Order #${data.orderId} approved by <@${user.id}>`)],
+        components: []
+      });
+    } catch {
+      safeReply(interaction, { content: `✅ Approved #${data.orderId}.` });
+    }
+    return;
+  }
+
+  // Admin reject from log channel
+  if (customId.startsWith("reject_")) {
+    if (!isAdmin(member)) return safeReply(interaction, { content: "No permission." });
+    const ticketId = customId.split("_")[1];
+    const data = findOrder(ticketId);
+    if (!data) return safeReply(interaction, { content: "Order not found." });
+    if (data.status === "rejected") return safeReply(interaction, { content: "Already rejected." });
+
+    // Show modal for rejection reason
+    return interaction.showModal(
+      new ModalBuilder()
+        .setCustomId(`modal_reject:${ticketId}`)
+        .setTitle("Reject Order")
+        .addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId("reason")
+              .setLabel("Reason for rejection")
+              .setStyle(TextInputStyle.Paragraph)
+              .setRequired(true)
+              .setMaxLength(500)
+          )
+        )
+    );
+  }
+
+  // Leave review button
+  if (customId.startsWith("leave_review:")) {
+    const ticketId = customId.split(":")[1];
+    return interaction.showModal(
+      new ModalBuilder()
+        .setCustomId(`modal_review:${ticketId}`)
+        .setTitle("Leave a Review ⭐")
+        .addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId("rating").setLabel("Rating (1–5)").setStyle(TextInputStyle.Short).setPlaceholder("5").setRequired(true).setMaxLength(1)
+          ),
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder().setCustomId("review_text").setLabel("Your review").setStyle(TextInputStyle.Paragraph).setPlaceholder("Tell us about your experience...").setRequired(true).setMaxLength(500)
+          )
+        )
+    );
   }
 }
 
 /* =====================================================
-   CLOSE TICKET
+   SELECT MENU HANDLER
 ===================================================== */
 
-async function closeTicket(channel, reason = "Closed") {
-  await channel.send({
-    embeds: [new EmbedBuilder().setColor(COLORS.red).setDescription(`🔒 ${reason}`)]
-  }).catch(() => {});
-  setTimeout(() => channel.delete().catch(() => {}), 3000);
+async function handleSelect(interaction) {
+  const { customId, guild, user, channel } = interaction;
+  activityMap.set(channel.id, Date.now());
+
+  if (customId === "choose_product") {
+    const chosen = interaction.values[0];
+    if (chosen === "southbronx") {
+      const durMenu = new StringSelectMenuBuilder()
+        .setCustomId("choose_duration")
+        .setPlaceholder("Select duration")
+        .addOptions([
+          { label: "1 Day", value: "1d", description: "Rp10.000" },
+          { label: "3 Day", value: "3d", description: "Rp20.000" },
+          { label: "7 Day", value: "7d", description: "Rp35.000" },
+          { label: "30 Day", value: "30d", description: "Rp100.000" },
+          { label: "Lifetime", value: "perm", description: "Rp150.000" }
+        ]);
+      return interaction.update({
+        content: "Select duration for **South Bronx**:",
+        components: [new ActionRowBuilder().addComponents(durMenu)]
+      });
+    }
+  }
+
+  if (customId === "choose_duration") {
+    const dur = interaction.values[0];
+    const priceMap = {
+      "1d": 10000, "3d": 20000, "7d": 35000, "30d": 100000, "perm": 150000
+    };
+    const price = priceMap[dur] || 10000;
+
+    // Create order channel
+    const ch = await guild.channels.create({
+      name: `order-${user.username}`.substring(0, 28).toLowerCase(),
+      type: ChannelType.GuildText,
+      permissionOverwrites: [
+        { id: guild.id, deny: [PermissionsBitField.Flags.ViewChannel] },
+        { id: user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] }
+      ]
+    });
+
+    const orderId = orders.length + 1;
+    orders.push({
+      orderId,
+      channelId: ch.id,
+      userId: user.id,
+      product: "South Bronx",
+      variant: durationLabel(dur),
+      duration: dur,
+      price,
+      status: "payment",
+      created: Date.now(),
+      paymentMethod: null
+    });
+    saveAll();
+    trackMessage(ch.id, "SYSTEM", `[OPENED] Order #${orderId} for South Bronx (${durationLabel(dur)}) at ${moneyIDR(price)}`);
+
+    // Payment instructions
+    const qris = {
+      label: "QRIS",
+      emoji: "🏦",
+      instructions: "Scan QRIS to pay the exact amount.",
+      image: QRIS_IMAGE
+    };
+    const paypal = {
+      label: "PayPal",
+      emoji: "💳",
+      instructions: "Send as Friends & Family.",
+      address: PAYPAL_EMAIL
+    };
+    const ltc = {
+      label: "LTC",
+      emoji: "🪙",
+      instructions: "Send to LTC address.",
+      address: LTC_TEXT
+    };
+
+    await ch.send({
+      content: `<@${user.id}>`,
+      embeds: [
+        new EmbedBuilder()
+          .setColor(COLOR_MAIN)
+          .setTitle("🏦 QRIS Payment")
+          .setDescription(qris.instructions)
+          .addFields({ name: "Amount", value: moneyIDR(price), inline: true })
+          .setImage(qris.image)
+      ]
+    });
+
+    await ch.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(COLOR_MAIN)
+          .setTitle("💳 Other Methods")
+          .addFields(
+            { name: "PayPal", value: `${paypal.instructions}\n**Address:** \`${paypal.address}\``, inline: false },
+            { name: "LTC", value: `${ltc.instructions}\n**Address:** \`${ltc.address}\``, inline: false }
+          )
+      ]
+    });
+
+    await ch.send({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(COLOR_YELLOW)
+          .setTitle(`🛒 Order #${orderId} — South Bronx`)
+          .setDescription(`**1.** Select payment method below\n**2.** Pay using instructions above\n**3.** Click **I've Paid ✅**`)
+          .addFields(
+            { name: "Product", value: "South Bronx", inline: true },
+            { name: "Duration", value: durationLabel(dur), inline: true },
+            { name: "Price", value: moneyIDR(price), inline: true },
+            { name: "Status", value: statusBadge("payment"), inline: true }
+          )
+      ],
+      components: [
+        new ActionRowBuilder().addComponents(
+          new StringSelectMenuBuilder()
+            .setCustomId(`select_payment:${ch.id}`)
+            .setPlaceholder("Choose payment method")
+            .addOptions([
+              { label: "QRIS", value: "qris", emoji: "🏦" },
+              { label: "PayPal", value: "paypal", emoji: "💳" },
+              { label: "LTC", value: "ltc", emoji: "🪙" }
+            ])
+        ),
+        new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`paid_${ch.id}`).setLabel("I've Paid ✅").setStyle(ButtonStyle.Success)
+        )
+      ]
+    });
+
+    await interaction.update({ content: `✅ Order channel created: ${ch}`, components: [], embeds: [] });
+    return;
+  }
+
+  // Payment method selection inside a ticket
+  if (customId.startsWith("select_payment:")) {
+    const [, ticketId] = customId.split(":");
+    const data = findOrder(ticketId);
+    if (!data || data.userId !== user.id) return safeReply(interaction, { content: "No active order found." });
+    const methodKey = interaction.values[0];
+    let method;
+    if (methodKey === "qris") method = { label: "QRIS", emoji: "🏦", image: QRIS_IMAGE };
+    else if (methodKey === "paypal") method = { label: "PayPal", emoji: "💳" };
+    else if (methodKey === "ltc") method = { label: "LTC", emoji: "🪙" };
+    else return safeReply(interaction, { content: "Invalid method." });
+    data.paymentMethod = method.label;
+    saveAll();
+    trackMessage(ticketId, user.tag, `[PAYMENT METHOD] Selected: ${method.label}`);
+    return interaction.reply({
+      embeds: [
+        new EmbedBuilder()
+          .setColor(COLOR_GREEN)
+          .setDescription(`✅ Payment method set to **${method.emoji} ${method.label}**. Complete your payment and click **I've Paid ✅**.`)
+      ],
+      ephemeral: true
+    });
+  }
 }
+
+/* =====================================================
+   MODAL HANDLER
+===================================================== */
+
+async function handleModal(interaction) {
+  const { customId, guild, user } = interaction;
+
+  if (customId.startsWith("modal_reject:")) {
+    const [, ticketId] = customId.split(":");
+    const reason = interaction.fields.getTextInputValue("reason");
+    const data = findOrder(ticketId);
+    if (!data) return safeReply(interaction, { content: "Order not found." });
+    data.status = "rejected";
+    data.rejectedAt = Date.now();
+    data.rejectedBy = user.id;
+    data.rejectionReason = reason;
+    saveAll();
+    trackMessage(ticketId, "SYSTEM", `[REJECTED] Order rejected by ${user.tag}. Reason: ${reason}`);
+    const targetCh = guild.channels.cache.get(ticketId);
+    if (targetCh) {
+      targetCh.send({
+        content: `<@${data.userId}>`,
+        embeds: [
+          new EmbedBuilder()
+            .setColor(COLOR_RED)
+            .setTitle("❌ Order Rejected")
+            .setDescription(`Reason: ${reason}`)
+        ]
+      });
+    }
+    return safeReply(interaction, { content: `❌ Order #${data.orderId} rejected.` });
+  }
+
+  if (customId.startsWith("modal_review:")) {
+    const [, ticketId] = customId.split(":");
+    const rating = interaction.fields.getTextInputValue("rating").trim();
+    const reviewText = interaction.fields.getTextInputValue("review_text").trim();
+    const stars = parseInt(rating, 10);
+    if (isNaN(stars) || stars < 1 || stars > 5) return safeReply(interaction, { content: "Rating must be 1–5." });
+    const starStr = "⭐".repeat(stars) + "☆".repeat(5 - stars);
+    const data = findOrder(ticketId);
+    const reviewCh = reviewChannelId ? guild.channels.cache.get(reviewChannelId) : guild.channels.cache.find(c => c.name === "reviews");
+    trackMessage(ticketId, user.tag, `[REVIEW] ${stars}/5 — ${reviewText}`);
+    if (reviewCh) {
+      reviewCh.send({
+        embeds: [
+          new EmbedBuilder()
+            .setColor(COLOR_YELLOW)
+            .setTitle(`${starStr} New Review`)
+            .setDescription(`> ${reviewText}`)
+            .addFields(
+              { name: "From", value: `<@${user.id}>`, inline: true },
+              { name: "Product", value: data?.product || "Unknown", inline: true }
+            )
+            .setTimestamp()
+        ]
+      });
+    }
+    return safeReply(interaction, { content: `✅ Thanks for your review! ${starStr}` });
+  }
+}
+
+/* =====================================================
+   MESSAGE TRACKING FOR TRANSCRIPTS
+===================================================== */
+
+client.on("messageCreate", (msg) => {
+  if (msg.author.bot) return;
+  const name = msg.channel.name || "";
+  if (
+    name.startsWith("order-") ||
+    name.startsWith("support-") ||
+    name.startsWith("claimed-") ||
+    name.startsWith("approved-") ||
+    name.startsWith("rejected-")
+  ) {
+    activityMap.set(msg.channel.id, Date.now());
+    trackMessage(msg.channel.id, `${msg.author.tag}`, msg.content || "[attachment/embed]");
+  }
+});
 
 /* =====================================================
    LOGIN
 ===================================================== */
 
-client.login(TOKEN);
+const missing = ["TOKEN", "CLIENT_ID", "GUILD_ID", "API_URL", "API_SECRET"].filter(k => !process.env[k]);
+if (missing.length) {
+  console.error(`❌ Missing environment variables: ${missing.join(", ")}`);
+  process.exit(1);
+}
+
+client.login(TOKEN).catch(err => {
+  console.error("❌ Login failed:", err.message);
+  process.exit(1);
+});
