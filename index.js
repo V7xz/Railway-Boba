@@ -33,15 +33,12 @@ const {
 const TOKEN = process.env.TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
-const API_URL = process.env.API_URL;
-const API_SECRET = process.env.API_SECRET;
 const LOADER_URL = process.env.LOADER_URL || "";
 const BANNER_URL = process.env.BANNER_URL || "";
 const QRIS_IMAGE = process.env.QRIS_IMAGE || "https://cdn.discordapp.com/attachments/1491728132661842061/1491880425923153991/Qris_gw.png";
 const PAYPAL_EMAIL = process.env.PAYPAL_EMAIL || "phantom.wtfff@gmail.com";
 const LTC_TEXT = process.env.LTC_TEXT || "Unavailable";
 
-// ── Derived config (not changing anything else) ─────────────────────────────
 const SCRIPT_URL = LOADER_URL;   // used in genkey embed
 
 /* =====================================================
@@ -145,23 +142,37 @@ function isAdmin(member) {
   );
 }
 
-// ── ADDED: Role‑based admin check ────────────────────────────────────────
 function isAdminByRole(interaction) {
   const ADMIN_ROLE_ID = process.env.ADMIN_ROLE_ID;
-  if (!ADMIN_ROLE_ID) return false;               // no role = deny
+  if (!ADMIN_ROLE_ID) return false;
   return interaction.member.roles.cache.has(ADMIN_ROLE_ID);
 }
 
-// ── ADDED: Duration helpers (from your original message (11).txt) ────────
-function parseDurasi(str) {
-  if (!str || str === "perm") return null;
-  const unit = str.slice(-1);
-  const val  = parseInt(str.slice(0, -1));
-  if (unit === "h") return val * 3600;
-  if (unit === "d") return val * 86400;
-  return 86400;
+// ── Unified duration parser (handles hours & days) ───────────────────────
+function parseDuration(val) {
+  if (!val || val === "perm") return 0;                 // permanent
+  const unit = val.slice(-1);
+  const num  = parseInt(val.slice(0, -1));
+  if (unit === "h") return num * 3600;                 // hours to seconds
+  if (unit === "d") return num * 86400;                // days to seconds
+  return 86400;                                        // default 1 day
 }
 
+// ── Duration label for slash command choices ─────────────────────────────
+function durationLabel(val) {
+  if (val === "1h")  return "1 Hour";
+  if (val === "3h")  return "3 Hours";
+  if (val === "6h")  return "6 Hours";
+  if (val === "12h") return "12 Hours";
+  if (val === "1d")  return "1 Day";
+  if (val === "3d")  return "3 Days";
+  if (val === "7d")  return "7 Days";
+  if (val === "30d") return "30 Days";
+  if (val === "perm") return "Lifetime";
+  return "Unknown";
+}
+
+// ── Human‑readable seconds (for embed) ────────────────────────────────────
 function formatDurasi(detik) {
   if (!detik) return "Permanent";
   const jam  = Math.floor(detik / 3600);
@@ -195,23 +206,7 @@ function findOrder(channelId) {
   return orders.find(o => o.channelId === channelId);
 }
 
-function durationToSeconds(val) {
-  if (val === "1d") return 86400;
-  if (val === "3d") return 259200;
-  if (val === "7d") return 604800;
-  if (val === "30d") return 2592000;
-  if (val === "perm") return 0;
-  return 86400;
-}
-
-function durationLabel(val) {
-  if (val === "1d") return "1 Day";
-  if (val === "3d") return "3 Day";
-  if (val === "7d") return "7 Day";
-  if (val === "30d") return "30 Day";
-  if (val === "perm") return "Lifetime";
-  return "Unknown";
-}
+// Old durationToSeconds removed, use parseDuration universally instead.
 
 function moneyIDR(n) {
   return `Rp ${Number(n).toLocaleString("id-ID")}`;
@@ -251,7 +246,6 @@ async function safeReply(interaction, payload) {
   }
 }
 
-// Track messages for transcripts
 function trackMessage(channelId, author, content) {
   if (!ticketMessages.has(channelId)) ticketMessages.set(channelId, []);
   ticketMessages.get(channelId).push({ author, content, timestamp: new Date().toISOString() });
@@ -343,31 +337,26 @@ function supportPanel() {
 }
 
 function dashboardEmbed(guild) {
-  let pending = 0;
-  let approved = 0;
-  for (const o of orders) {
-    if (o.status === "waiting") pending++;
-    if (o.status === "approved") approved++;
-  }
+  const now = Date.now();
+  const totalKeys = keys.length;
+  const activeKeys = keys.filter(k => k.expires === 0 || k.expires > now).length;
+
+  const totalOrders = orders.length;
+  const pendingOrders = orders.filter(o => o.status === "waiting").length;
+  const paymentOrders = orders.filter(o => o.status === "payment").length;
+  const approvedOrders = orders.filter(o => o.status === "approved").length;
+  const rejectedOrders = orders.filter(o => o.status === "rejected").length;
+  const closedOrders = orders.filter(o => o.status === "closed" || o.status === "cancelled").length;
+
   return new EmbedBuilder()
     .setColor(COLOR_MAIN)
     .setTitle("📊 Phantom Dashboard")
     .addFields(
-      { name: "Pending Orders", value: `${pending}`, inline: true },
-      { name: "Approved Today", value: `${approved}`, inline: true },
-      { name: "Guild", value: guild.name, inline: true }
+      { name: "Keys", value: `🔑 Total: ${totalKeys}\n🟢 Active: ${activeKeys}\n🔴 Expired: ${totalKeys - activeKeys}`, inline: true },
+      { name: "Orders", value: `📦 Total: ${totalOrders}\n💳 Pending Payment: ${paymentOrders}\n⏳ Awaiting Approval: ${pendingOrders}`, inline: true },
+      { name: "Completed", value: `✅ Approved: ${approvedOrders}\n❌ Rejected: ${rejectedOrders}\n🚫 Closed: ${closedOrders}`, inline: true }
     )
     .setTimestamp();
-}
-
-function buildPaymentEmbed(order, method) {
-  return new EmbedBuilder()
-    .setTitle(`${method.emoji || "💳"} ${method.label} — Payment Instructions`)
-    .setColor(COLOR_MAIN)
-    .setDescription(method.instructions)
-    .addFields({ name: "Amount Due", value: moneyIDR(order.price), inline: true })
-    .setFooter({ text: "After paying, click I've Paid ✅" })
-    .setImage(method.image || null);
 }
 
 /* =====================================================
@@ -400,11 +389,32 @@ const commands = [
     .addStringOption(o =>
       o.setName("duration").setDescription("Key duration").setRequired(true)
         .addChoices(
-          { name: "1 Day", value: "1d" },
-          { name: "3 Day", value: "3d" },
-          { name: "7 Day", value: "7d" },
-          { name: "30 Day", value: "30d" },
-          { name: "Lifetime", value: "perm" }
+          { name: "1 Hour",    value: "1h"   },
+          { name: "3 Hours",   value: "3h"   },
+          { name: "6 Hours",   value: "6h"   },
+          { name: "12 Hours",  value: "12h"  },
+          { name: "1 Day",     value: "1d"   },
+          { name: "3 Days",    value: "3d"   },
+          { name: "7 Days",    value: "7d"   },
+          { name: "30 Days",   value: "30d"  },
+          { name: "Lifetime",  value: "perm" }
+        )
+    ),
+  new SlashCommandBuilder()
+    .setName("extendkey")
+    .setDescription("Extend key duration")
+    .addStringOption(o => o.setName("key").setDescription("Key to extend").setRequired(true))
+    .addStringOption(o =>
+      o.setName("duration").setDescription("Duration to add").setRequired(true)
+        .addChoices(
+          { name: "1 Hour",    value: "1h"   },
+          { name: "3 Hours",   value: "3h"   },
+          { name: "6 Hours",   value: "6h"   },
+          { name: "12 Hours",  value: "12h"  },
+          { name: "1 Day",     value: "1d"   },
+          { name: "3 Days",    value: "3d"   },
+          { name: "7 Days",    value: "7d"   },
+          { name: "30 Days",   value: "30d"  }
         )
     ),
   new SlashCommandBuilder()
@@ -441,7 +451,6 @@ client.once("ready", async () => {
     console.error(err);
   }
 
-  // Auto close inactive tickets
   setInterval(async () => {
     const now = Date.now();
     for (const data of orders) {
@@ -594,12 +603,10 @@ async function handleSlash(interaction) {
     saveAll();
     trackMessage(channel.id, "SYSTEM", `[APPROVED] Payment approved by ${interaction.user.tag}`);
 
-    // Notify customer with product delivery
     let deliveryContent = "";
     if (data.product === "South Bronx") {
       const key = generateKey();
-      const seconds = durationToSeconds(data.duration);
-      // Save the key to local storage so it can be used later (optional but consistent)
+      const seconds = parseDuration(data.duration);
       keys.push({ key, expires: seconds === 0 ? 0 : Date.now() + seconds * 1000, hwid: null, created: Date.now() });
       saveAll();
       deliveryContent = `Here is your script:\n\`\`\`lua\n_G.KEY="${key}"\nloadstring(game:HttpGet("${LOADER_URL}"))()\n\`\`\``;
@@ -649,7 +656,7 @@ async function handleSlash(interaction) {
     return safeReply(interaction, { content: "❌ Rejected." });
   }
 
-  // ── Key Bot Commands (NOW LOCAL, NO EXTERNAL API) ──────────────────────
+  // ── Key Bot Commands (LOCAL, no external API) ──────────────────────────
 
   if (commandName === "genkey") {
     if (!isAdmin(member) && !isAdminByRole(interaction))
@@ -658,17 +665,16 @@ async function handleSlash(interaction) {
     await interaction.deferReply({ flags: 64 });
 
     const durasiStr   = interaction.options.getString("durasi") || "1d";
-    const durasiDetik = parseDurasi(durasiStr);
+    const seconds     = parseDuration(durasiStr);
     const key         = generateKey();
 
     try {
-      // Simpan key ke storage lokal
-      const expires = durasiDetik ? Date.now() + durasiDetik * 1000 : 0; // 0 = permanent
+      const expires = seconds ? Date.now() + seconds * 1000 : 0;
       keys.push({ key, expires, hwid: null, created: Date.now() });
       saveAll();
 
       const scriptReady = `_G.KEY = "${key}"\nloadstring(game:HttpGet("${SCRIPT_URL}"))()`;
-      const expireText = durasiDetik
+      const expireText = seconds
         ? `Expired: ${new Date(expires).toLocaleString("id-ID")}`
         : "Key ini tidak akan expired (Permanent)";
 
@@ -677,7 +683,7 @@ async function handleSlash(interaction) {
         .setColor(0x00ff99)
         .addFields(
           { name: "Key", value: "```" + key + "```" },
-          { name: "Durasi", value: formatDurasi(durasiDetik), inline: true },
+          { name: "Durasi", value: formatDurasi(seconds), inline: true },
           { name: "Expired", value: expireText, inline: true },
           { name: "Script - Copy Paste ke Xeno", value: "```lua\n" + scriptReady + "\n```" }
         )
@@ -691,31 +697,73 @@ async function handleSlash(interaction) {
     }
   }
 
-  if (commandName === "checkkey") {
+  // ── EXTENDKEY (NEW) ────────────────────────────────────────────────────────
+  if (commandName === "extendkey") {
     if (!isAdmin(member) && !isAdminByRole(interaction))
       return interaction.reply({ content: "No permission.", flags: 64 });
+
     const key = options.getString("key");
-    const data = keys.find(k => k.key === key);
-    if (!data) return interaction.reply({ content: "❌ Key not found.", flags: 64 });
-    const now = Date.now();
-    if (data.expires !== 0 && now > data.expires) {
-      keys = keys.filter(k => k.key !== key);
-      saveAll();
-      return interaction.reply({ content: "❌ Key has expired.", flags: 64 });
+    const durStr = options.getString("duration");
+    const addSeconds = parseDuration(durStr);
+    if (addSeconds === 0) return interaction.reply({ content: "❌ Invalid duration.", flags: 64 });
+
+    const entry = keys.find(k => k.key === key);
+    if (!entry) return interaction.reply({ content: "❌ Key not found.", flags: 64 });
+    if (entry.expires === 0) {
+      return interaction.reply({ content: "❌ Cannot extend a permanent key.", flags: 64 });
     }
+
+    const now = Date.now();
+    const currentExpiry = entry.expires;
+    const newExpiry = currentExpiry < now ? now + addSeconds * 1000 : currentExpiry + addSeconds * 1000;
+    entry.expires = newExpiry;
+    saveAll();
+
     const embed = new EmbedBuilder()
-      .setColor(COLOR_MAIN)
-      .setTitle("🔑 Key Info")
+      .setColor(COLOR_GREEN)
+      .setTitle("✅ Key Extended")
       .addFields(
-        { name: "Key", value: `\`${data.key}\`` },
-        { name: "Expires", value: data.expires === 0 ? "Never" : new Date(data.expires).toLocaleString("id-ID"), inline: true },
-        { name: "HWID", value: data.hwid || "Not set", inline: true },
-        { name: "Created", value: new Date(data.created).toLocaleString("id-ID"), inline: true }
+        { name: "Key", value: `\`${key}\`` },
+        { name: "Added Time", value: formatDurasi(addSeconds), inline: true },
+        { name: "Previous Expiry", value: new Date(currentExpiry).toLocaleString("id-ID") },
+        { name: "New Expiry", value: new Date(newExpiry).toLocaleString("id-ID") }
       )
       .setTimestamp();
+
     return interaction.reply({ embeds: [embed], flags: 64 });
   }
 
+  // ── CHECKKEY (ENHANCED) ────────────────────────────────────────────────────
+  if (commandName === "checkkey") {
+    if (!isAdmin(member) && !isAdminByRole(interaction))
+      return interaction.reply({ content: "No permission.", flags: 64 });
+
+    const key = options.getString("key");
+    const data = keys.find(k => k.key === key);
+    if (!data) return interaction.reply({ content: "❌ Key not found.", flags: 64 });
+
+    const now = Date.now();
+    const isExpired = data.expires !== 0 && now > data.expires;
+    const statusText = data.expires === 0 ? "🟢 Permanent" : (isExpired ? "🔴 Expired" : "🟢 Active");
+    const expiryDisplay = data.expires === 0 ? "Never" : new Date(data.expires).toLocaleString("id-ID");
+    const relativeTime = data.expires === 0 ? "∞" : `<t:${Math.floor(data.expires / 1000)}:R>`;
+
+    const embed = new EmbedBuilder()
+      .setColor(isExpired ? COLOR_RED : COLOR_MAIN)
+      .setTitle("🔑 Key Details")
+      .addFields(
+        { name: "Key", value: `\`${data.key}\`` },
+        { name: "Created", value: new Date(data.created).toLocaleString("id-ID"), inline: true },
+        { name: "Expires", value: `${expiryDisplay}\n${relativeTime}`, inline: true },
+        { name: "Status", value: statusText, inline: true },
+        { name: "HWID", value: data.hwid || "Not set", inline: true }
+      )
+      .setTimestamp();
+
+    return interaction.reply({ embeds: [embed], flags: 64 });
+  }
+
+  // ── REVOKEKEY ──────────────────────────────────────────────────────────────
   if (commandName === "revokekey") {
     if (!isAdmin(member) && !isAdminByRole(interaction))
       return interaction.reply({ content: "No permission.", flags: 64 });
@@ -727,6 +775,7 @@ async function handleSlash(interaction) {
     return interaction.reply({ content: "✅ Key revoked.", flags: 64 });
   }
 
+  // ── RESETHWID ───────────────────────────────────────────────────────────────
   if (commandName === "resethwid") {
     if (!isAdmin(member) && !isAdminByRole(interaction))
       return interaction.reply({ content: "No permission.", flags: 64 });
@@ -804,6 +853,10 @@ async function handleButton(interaction) {
       .setTitle("💰 Pricing")
       .setDescription(`
 **South Bronx**
+1 Hour — Rp10.000
+3 Hours — Rp20.000
+6 Hours — Rp35.000
+12 Hours — Rp50.000
 1 Day — Rp10.000
 3 Day — Rp20.000
 7 Day — Rp35.000
@@ -822,7 +875,6 @@ Lifetime — Rp150.000
     return;
   }
 
-  // Payment flow buttons (I've Paid)
   if (customId.startsWith("paid_")) {
     const ticketId = customId.split("_")[1];
     const data = findOrder(ticketId);
@@ -889,7 +941,8 @@ Lifetime — Rp150.000
       let delivery = "";
       if (data.product === "South Bronx") {
         const key = generateKey();
-        keys.push({ key, expires: durationToSeconds(data.duration) === 0 ? 0 : Date.now() + durationToSeconds(data.duration) * 1000, hwid: null, created: Date.now() });
+        const seconds = parseDuration(data.duration);
+        keys.push({ key, expires: seconds === 0 ? 0 : Date.now() + seconds * 1000, hwid: null, created: Date.now() });
         saveAll();
         delivery = `\n\`\`\`lua\n_G.KEY="${key}"\nloadstring(game:HttpGet("${LOADER_URL}"))()\n\`\`\``;
       }
@@ -976,6 +1029,10 @@ async function handleSelect(interaction) {
         .setCustomId("choose_duration")
         .setPlaceholder("Select duration")
         .addOptions([
+          { label: "1 Hour", value: "1h", description: "Rp10.000" },
+          { label: "3 Hours", value: "3h", description: "Rp20.000" },
+          { label: "6 Hours", value: "6h", description: "Rp35.000" },
+          { label: "12 Hours", value: "12h", description: "Rp50.000" },
           { label: "1 Day", value: "1d", description: "Rp10.000" },
           { label: "3 Day", value: "3d", description: "Rp20.000" },
           { label: "7 Day", value: "7d", description: "Rp35.000" },
@@ -992,6 +1049,7 @@ async function handleSelect(interaction) {
   if (customId === "choose_duration") {
     const dur = interaction.values[0];
     const priceMap = {
+      "1h": 10000, "3h": 20000, "6h": 35000, "12h": 50000,
       "1d": 10000, "3d": 20000, "7d": 35000, "30d": 100000, "perm": 150000
     };
     const price = priceMap[dur] || 10000;
